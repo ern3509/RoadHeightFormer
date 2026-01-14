@@ -85,8 +85,8 @@ if __name__ == '__main__':
 
     # dataset, dataloader
     #test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
-    #test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='test', down_scale=args.down_scale)
-    test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_sb', mode='test', down_scale=args.down_scale)
+    test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='test', down_scale=args.down_scale)
+    #test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_sb', mode='test', down_scale=args.down_scale)
     test_loader = DataLoader(test_set, 1, shuffle=False, num_workers=1, drop_last=False, pin_memory=True)
     print('test set:', len(test_set))
 

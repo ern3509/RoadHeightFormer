@@ -27,8 +27,8 @@ class RSRD(Dataset):
             self.load_dataset_names('./filenames/train/')
             self.preprocessed_path = os.path.join(preprocessed_path, 'train')
         else:
-            self.load_dataset_names('./filenames/test/')
-            self.preprocessed_path = os.path.join(preprocessed_path, 'test')
+            self.load_dataset_names('./filenames/train/') #rechnage with test for testing on test set
+            self.preprocessed_path = os.path.join(preprocessed_path, 'train')
 
         #######################
         # settings about range of interest. If you change the params below, please confirm that the voxel ROI completely falls in the image view.
@@ -92,7 +92,8 @@ class RSRD(Dataset):
             with open(os.path.join(sample_path, file), 'rb') as f:
                 data = pickle.load(f)
             data_all += data
-        self.data_all = data_all
+        self.data_all = data_all[:8]
+        print(f"Total number of samples loaded: {len(self.data_all)}")
 
     def get_lidar2cam(self, date_stamp):
         # name in format: 20230408023213.400

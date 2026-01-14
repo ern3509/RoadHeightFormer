@@ -2,6 +2,7 @@ import numpy as np
 from utils.experiment import make_nograd_func
 import torch
 import matplotlib.pyplot as plt
+from CARDSet.dataset import CARDSetDataset, CARDSetDatasetV2Smalldataset
 
 class Metric():
     def __init__(self, ele_range, num_grids_z, distance_wise=False):
@@ -64,7 +65,7 @@ class Metric():
         print("check the mask_roi",mask_roi.sum())
         ele_mask = torch.logical_and(mask_roi, mask)
         print("check the mask_roi",ele_mask.sum())
-        print("ele_gt", ele_gt.max(), ele_gt.min())
+        print("ele_gt", ele_gt.shape, ele_gt.shape)
 
 
         self.count_all += 1

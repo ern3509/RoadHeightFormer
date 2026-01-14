@@ -21,6 +21,8 @@ from datetime import datetime
 from CARDSet.dataset import CARDSetDataset, CARDSetDatasetV2Smalldataset
 import wandb
 import time
+import matplotlib.pyplot as plt
+
 
 os.environ['WANDB_MODE'] = 'online'
 
@@ -70,9 +72,15 @@ def train():
         name = "experiment " + str(now.year) +  str(now.month) + "/" +  str(now.hour) + ":" + str(now.minute),
         config ={
             "learning_rate" : 8e-4,
-            "epochs": args.epochs
+            "epochs": args.epochs,
+            "dataset": args.dataset,
+            "trainloader length": len(train_loader),
+            "testloader length": len(test_loader),
     })
     global_step = -1
+    logged_train_static = False
+    gt_vmax = [0, 0, 0]
+    gt_vmin = [14, 14, 14]
     for epoch_idx in tqdm(range(args.epochs)):
         
         with tqdm(total=len(train_loader), desc=f"Epoch {epoch_idx+1}", unit="batch") as pbar:
@@ -92,8 +100,52 @@ def train():
                         ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
                     else:
                         ele_pred = model(imgs_left, proj_index_left)
+                        ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
                     loss_all = loss_func(ele_pred, ele_gt, ele_mask)
 
+                
+            #/****logging ***********************
+                if global_step % 5 == 0:
+                    log_dict = {}
+                    
+                    for s in range(1):
+                        
+                        # Log static data ONCE
+                        if not logged_train_static:
+                            log_dict[f"train/static/sample_{s}/image"] = \
+                            wandb_rgb_image(train_imgs_fixed[s], caption=f"Train image sample {s}")
+                            gt_np = np.ma.masked_where(
+                                train_mask_fixed[s].cpu().numpy() == 0,
+                                train_gt_fixed[s].cpu().numpy(),
+                            )
+
+                            gt_vmin[s] = gt_np.min()
+                            gt_vmax[s] = gt_np.max()
+
+                            log_dict[f"train/static/sample_{s}/gt"] = \
+                                wandb_heightmap_image(train_gt_fixed[s], train_mask_fixed[s], caption="GT (cm)", vmin = gt_vmin[s], vmax = gt_vmax[s])
+
+                            
+
+                # # Log predictions WITH SLIDER
+                # for s in range(3):
+                        print("ele pred fixed shape:", ele_pred_fixed.shape)	
+                        height_prediction = F.softmax(ele_pred_fixed[s], dim=0)  #ele pred shape: B(number of samples), num_classes, H, W,  #height prediction shape: num_classes, H, W
+                        print("height prediction shape:", height_prediction.shape)
+                        height_prediction = torch.sum(height_prediction * model.ele_values[0],dim=0) #shape after sum: H, W
+                        print("model.ele_values shape:", model.ele_values.shape) #shape: num_classes
+                        print("height prediction after sum shape:", height_prediction.shape)
+                        img = wandb_heightmap_image(
+                                height_prediction.squeeze(),
+                                train_mask_fixed[s],
+                                caption=f"step {global_step}", vmin = gt_vmin[s], vmax = gt_vmax[s]
+                            )
+                        error_img = wandb_error_map(height_prediction.squeeze(), train_gt_fixed[s], train_mask_fixed[s], caption=f"Error map at step {global_step} of sample {s}")
+                        wandb.log({"train/error_map_sample_" + str(s): error_img}, step=global_step)
+                        wandb.log({"train/pred_sample_" + str(s): img}, step=global_step)
+
+                    logged_train_static = True
+                    wandb.log(log_dict, step=global_step)
                 scaler.scale(loss_all).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -106,7 +158,7 @@ def train():
                     print('nan loss!')
                     exit()
                 print("loss has been logged")
-                run.log({"loss": loss_wandb})
+                wandb.log({"loss": loss_wandb}, step = global_step)
 
                 if global_step % args.summary_freq == 0:
                     loss_data = loss_all.data.item()
@@ -122,13 +174,16 @@ def train():
                     torch.save(model.state_dict(), "{}/checkpoint_epoch{:0>2}_{:0>6}.ckpt".format(args.logdir, epoch_idx+1, global_step))
 
                     torch.cuda.empty_cache()
-                    [metric_all, _], eval_loss = test_sample(test_loader, global_step)
-                    run.log({"eval_loss": eval_loss})
+                    [metric_all, _], eval_loss = test_sample(test_loader, global_step, run)
+                    wandb.log({"eval_loss": eval_loss}, step = global_step)
+                    wandb.log({"metric_abs": metric_all[0]}, step = global_step)
+                    wandb.log({"metric_rmse": metric_all[1]}, step = global_step)
+                    wandb.log({"metric_gt05cm": metric_all[2]}, step = global_step)
 
                     early_stopping(eval_loss)
                     
 
-                    info = 'test:    abs_err:%.3f, rmse:%.3f, >0.5cm:%.2f' % (metric_all[0], metric_all[1], metric_all[2]*100)
+                    info = 'test:    abs_err:%.3f, rmse:%.3f, >0.5cm:%.2f, eval_loss:%.3f' % (metric_all[0], metric_all[1], metric_all[2]*100, eval_loss)
                     log_file.write(info + '\n')
                     log_file.flush()
                     print(info)
@@ -140,10 +195,11 @@ def train():
                 break
     run.finish()
 @make_nograd_func
-def test_sample(test_loader, global_step):
+def test_sample(test_loader, global_step, run):
     model.eval()
     eval_loss = 0.0
-    
+    logged_eval_static = False
+
     for i, sample in enumerate(test_loader):
         if args.stereo:
             (imgs_left, imgs_right, ele_gt, ele_mask, proj_index_left, proj_index_right, _) = sample
@@ -158,17 +214,43 @@ def test_sample(test_loader, global_step):
                 ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
             else:
                 ele_pred = model(imgs_left, proj_index_left)
+                ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
             metric.compute(ele_pred, ele_gt, ele_mask)
-            print("youuuu", ele_pred.shape, ele_gt.shape)
+            #print("youuuu", ele_pred.shape, ele_gt.shape)
             #ele_pred = torch.tensor(ele_pred.unsqueeze(dim=0))
             loss_all = sum_absolute_error(ele_pred[ele_mask > 0], ele_gt[ele_mask > 0]) / ele_mask.sum().item()
-            if i==0:
-                img_prob = ele_pred
-                ele_gt = ele_gt
-                ele_mask = ele_mask
+            log_dict = {}
+            if i == 0:
+                # Log static data ONCE
+                if not logged_eval_static:
+                    for s in range(1):
+                        log_dict[f"eval/static/sample_{s}/image"] = \
+                            wandb_rgb_image(eval_imgs_fixed[s], caption="Eval image")
 
-                CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(img_prob.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_pred' + global_step.__str__() + '.png')
-                CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_gt' + global_step.__str__() + '.png')
+                        log_dict[f"eval/static/sample_{s}/gt"] = \
+                            wandb_heightmap_image(eval_gt_fixed[s], eval_mask_fixed[s], caption="GT (cm)")
+
+                    logged_eval_static = True
+
+                # Log predictions WITH SLIDER
+                pred_images = []
+                for s in range(1):
+                    height_prediction = ele_pred_fixed[s]	
+                    print("height prediction before softmax shape:", height_prediction.shape)
+                    #height_prediction = torch.sum(height_prediction * model.ele_values[0],dim=0)
+                    img = wandb_heightmap_image(
+                            height_prediction.squeeze(),
+                            eval_mask_fixed[s],
+                            caption=f"step {global_step}"
+                        )
+                    error_img = wandb_error_map(height_prediction.squeeze(), eval_gt_fixed[s], eval_mask_fixed[s], caption=f"Error map at step {global_step} of sample {s}")
+                    wandb.log({"eval/pred_sample_" + str(s): img}, step=global_step)
+                    wandb.log({"eval/error_map_sample_" + str(s): error_img}, step=global_step)
+
+                wandb.log(log_dict, step=global_step)
+
+                #CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(img_prob.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_pred' + global_step.__str__() + '.png')
+                #CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_gt' + global_step.__str__() + '.png')
             
             
             eval_loss += loss_all
@@ -178,8 +260,78 @@ def test_sample(test_loader, global_step):
     eval_loss /= len(test_loader)
     return metric_values, eval_loss
 
+def wandb_error_map(
+    pred: torch.Tensor,
+    gt: torch.Tensor,
+    mask: torch.Tensor,
+    caption: str = "",
+    cmap: str = "RdBu_r",
+    vmin: float | None = None,
+    vmax: float | None = None,
+) -> wandb.Image:
+    """
+    Compute per-cell error (pred - gt) and return as wandb.Image.
+
+    Args:
+        pred: torch.Tensor (H, W) prediction
+        gt: torch.Tensor (H, W) ground truth
+        mask: torch.Tensor (H, W), 0 = invalid
+        caption: image caption
+        cmap: diverging colormap 
+        vmin/vmax: optional fixed range for color normalization (recommended)
+
+    Returns:
+        wandb.Image
+    """
+    # --- to numpy ---
+    pred = pred.detach().cpu().numpy()
+    gt = gt.detach().cpu().numpy()
+    mask = mask.detach().cpu().numpy()
+
+    # --- compute error ---
+    error = pred - gt
+    error = np.ma.masked_where(mask == 0, error)
+
+    # --- plot ---
+    fig, ax = plt.subplots(figsize=(4, 4))
+    im = ax.imshow(error, cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.axis("off")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Error (cm)")
+    fig.tight_layout()
+
+    return wandb.Image(fig, caption=caption)
 
 
+def wandb_heightmap_image(height_map, mask, caption, cmap="plasma", vmin = None, vmax = None):
+    """
+    height_map, mask: torch.Tensor (H, W)
+    """
+    height_map = height_map.detach().cpu().numpy()
+    mask = mask.detach().cpu().numpy()
+
+
+    height_map = np.ma.masked_where(mask == 0, height_map)
+    fig, ax = plt.subplots(figsize=(4, 4))
+    im = ax.imshow(height_map, cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.axis("off")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="cm")
+    fig.tight_layout()
+    
+    return wandb.Image(fig, caption=caption)
+
+def wandb_rgb_image(img, caption):
+    img = img.detach().cpu().permute(1, 2, 0).numpy()
+    return wandb.Image(img, caption=caption)
+
+def get_fixed_samples(dataset, indices, device):
+    samples = [dataset[i] for i in indices]
+
+    imgs = torch.stack([s[0] for s in samples]).to(device)
+    ele_gt = torch.stack([s[1] for s in samples]).to(device)
+    ele_mask = torch.stack([s[2] for s in samples]).to(device)
+    proj_idx = torch.stack([s[3] for s in samples]).to(device)
+
+    return imgs, ele_gt, ele_mask, proj_idx
 
 def sum_absolute_error(pred, gt):
     """
@@ -204,6 +356,7 @@ def sum_absolute_error(pred, gt):
     return sae
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='RoadBEV: Road Surface Reconstruction in Bird\'s Eye View')
+    parser.add_argument('--dataset', help='dataset to use: add it to wandb runs')
     parser.add_argument('--stereo', action='store_true', help='if yes, use RoadBEV-stereo; otherwise, RoadBEV-mono')
     parser.add_argument('--cla_res', type=float, default=0.5, help='class resolution for elevation classification')
     parser.add_argument('--batch_size', type=int, default=8, help='training batch size')
@@ -211,7 +364,7 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=50, help='number of epochs to train')
     parser.add_argument('--logdir', default='./checkpoints/', help='the directory to save logs and checkpoints')
     parser.add_argument('--loadckpt', default=None, help='load the weights from a specific checkpoint')
-    parser.add_argument('--summary_freq', type=int, default=500, help='summary_freq')
+    parser.add_argument('--summary_freq', type=int, default=70, help='summary_freq')
     parser.add_argument('--seed', type=int, default=307, metavar='S', help='random seed')
 
     # parse arguments, set seeds
@@ -231,15 +384,34 @@ if __name__ == '__main__':
         print('training RoadBEV-mono!')
 
     # dataset, dataloader
-    #train_set = RSRD(training=True, stereo=args.stereo, down_scale=args.down_scale)
-    train_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='train', down_scale=args.down_scale)
+    if 'RSRD' in args.dataset:
+        train_set = RSRD(training=True, stereo=args.stereo, down_scale=args.down_scale)
+        test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
+
+    else:
+        train_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='train', down_scale=args.down_scale)
+        test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='test', down_scale=args.down_scale)
+        #test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
+        #train_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='train', down_scale=args.down_scale)
+    #train_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='train', down_scale=args.down_scale)
+
     train_loader = DataLoader(train_set, args.batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=True)
     
-    #test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
-    test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='test', down_scale=args.down_scale)
+    #test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='test', down_scale=args.down_scale)
     test_loader = DataLoader(test_set, 1, shuffle=False, num_workers=4, drop_last=False, pin_memory=True)
     print('dataset size - train:%d, test:%d' % (len(train_set), len(test_set)))
 
+    #get fixed sample for logging
+    fixed_train_indices = [0]  
+    fixed_eval_indices  = [0]
+
+    device = "cuda"
+
+    train_imgs_fixed, train_gt_fixed, train_mask_fixed, train_proj_fixed = get_fixed_samples(train_loader.dataset, fixed_train_indices, device)
+    print(f"train mask fixed shape: {train_mask_fixed.shape}")
+
+    eval_imgs_fixed, eval_gt_fixed, eval_mask_fixed, eval_proj_fixed = get_fixed_samples(test_loader.dataset, fixed_eval_indices, device)
+    
     # model, optimizer
     ele_range = train_set.y_range
     voxel_ele_res = train_set.grid_res[1]
@@ -283,11 +455,11 @@ if __name__ == '__main__':
     args.logdir = os.path.join(args.logdir, datetime.utcnow().strftime('%Y%m%d%H%M%S'))
     print('logging dir:', args.logdir)
     os.makedirs(args.logdir, exist_ok=True)
-    shutil.copy('./utils/dataset.py', os.path.join(args.logdir, 'dataset.py'))
-    shutil.copy('./models/model.py', os.path.join(args.logdir, 'model.py'))
-    shutil.copy('./models/efficientnet.py', os.path.join(args.logdir, 'efficientnet.py'))
-    shutil.copy('./models/ele_head.py', os.path.join(args.logdir, 'ele_head.py'))
-    shutil.copy('train.py', os.path.join(args.logdir, 'train.py'))
+    # shutil.copy('./utils/dataset.py', os.path.join(args.logdir, 'dataset.py'))
+    # shutil.copy('./models/model.py', os.path.join(args.logdir, 'model.py'))
+    # shutil.copy('./models/efficientnet.py', os.path.join(args.logdir, 'efficientnet.py'))
+    # shutil.copy('./models/ele_head.py', os.path.join(args.logdir, 'ele_head.py'))
+    # shutil.copy('train.py', os.path.join(args.logdir, 'train.py'))
     log_file = open(os.path.join(args.logdir, 'log.txt'), 'a')
 
     train()

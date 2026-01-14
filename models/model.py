@@ -19,7 +19,8 @@ class Elevation(nn.Module):
         ele_values = -torch.arange(self.num_classes, dtype=torch.float32, device='cuda')*self.cla_res + self.ele_range*100 - self.cla_res/2
         self.ele_values = ele_values.reshape(1, self.num_classes, 1, 1)
 
-        self.feature_extraction = efficientnet_feature(self.stereo)
+        # Replace efficientnet_feature with DINOv2 backbone
+        self.feature_extraction =efficientnet_feature(self.stereo) #self._initialize_dinov2_backbone() # efficientnet_feature(self.stereo)
         #self.feature_extraction = DepthAnythingBackbone(self.stereo)
 
         if self.stereo:
@@ -45,10 +46,18 @@ class Elevation(nn.Module):
             elif isinstance(m, nn.Linear):
                 m.bias.data.zero_()
 
+    def _initialize_dinov2_backbone(self):
+        # Load pretrained DINOv2 backbone
+        dinov2 = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+        dinov2.eval()  # Set to evaluation mode
+        dinov2.feat_channel = 768  # DINOv2 base feature map channel count
+        return dinov2
+    
     def forward(self, imgs_left, proj_index_left, *args):
         # proj_index: [num_samples, 2, num_grids_z*num_grids_x*num_grids_y]
-
-        features_left = self.feature_extraction(imgs_left)
+        with torch.no_grad():
+            features_left = self.feature_extraction(imgs_left)
+            print("Extracted features shape:", features_left.shape)
         B, C, H, W = features_left.shape
         features_left = features_left.reshape(B, C, -1)
         linear_indices = proj_index_left[:, 1, :] * W + proj_index_left[:, 0, :]
