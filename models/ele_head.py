@@ -11,6 +11,7 @@ class EleCla2D(nn.Module):
         self.feat_channel = feat_channel
         self.channel_reshaped = self.feat_channel * self.num_grids_y
         self.num_classes = num_classes
+        print("EleCla2D: channel_reshaped:", self.feat_channel, "*", self.num_grids_y, "=", self.channel_reshaped)
 
         self.inplanes = int(self.channel_reshaped/8)
         self.first_conv = nn.Sequential(
@@ -27,6 +28,7 @@ class EleCla2D(nn.Module):
     def forward(self, feat_voxel):
         # feat_voxel: [B, C, Z, X, Y]
         B = feat_voxel.shape[0]
+        print("EleCla2D: feat_voxel shape:", feat_voxel.shape)
         #### get the BEV feature.  shape: [B, C_, num_grids_z, num_grids_x]
         feat_bev = feat_voxel.permute(0, 4, 1, 2, 3)
         feat_bev = feat_bev.reshape(B, self.channel_reshaped, self.num_grids_z, self.num_grids_x)  # [B,Y*C,Z,X]
@@ -90,3 +92,56 @@ class EleCla3D(nn.Module):
         prob_volume = prob_volume.squeeze(1)
 
         return prob_volume
+
+class EleReg2D(nn.Module):
+    def __init__(self, feat_channel, num_grids, normalize=False):
+        super(EleReg2D, self).__init__()
+        self.num_grids_x, self.num_grids_y, self.num_grids_z = num_grids
+        self.channel_reshaped = feat_channel * self.num_grids_y
+
+        self.inplanes = int(self.channel_reshaped / 8)
+
+        self.reg_head = nn.Sequential(
+            nn.Conv2d(self.inplanes, self.inplanes // 2, 3, padding=1, bias=True),
+            nn.BatchNorm2d(self.inplanes // 2),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(self.inplanes // 2, self.inplanes // 4, 3, padding=1, bias=True),
+            nn.BatchNorm2d(self.inplanes // 4),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(self.inplanes // 4, 2, kernel_size=1, bias=True)
+        )
+        self.first_conv = nn.Sequential(
+            convbn(self.channel_reshaped, self.inplanes, 5, 1, 2, 1),
+            nn.ReLU(inplace=True)
+        )
+        if normalize:
+            self.normoutput = nn.Tanh()
+        """self.effnet_reg = efficientnet_cla(self.inplanes, 2)
+
+        self.final_conv = nn.Sequential(
+            convbn(2, 2, 3, 1, 1, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(2, 2, kernel_size=1, stride=1, padding=0, bias=False)
+        ) """
+
+    def forward(self, feat_voxel):
+        # feat_voxel: [B, C, Z, X, Y]
+        B = feat_voxel.shape[0]
+        print("EleReg2D: feat_voxel shape:", feat_voxel.shape)
+
+        feat_bev = feat_voxel.permute(0, 4, 1, 2, 3)
+        feat_bev = feat_bev.reshape(
+            B, self.channel_reshaped, self.num_grids_z, self.num_grids_x
+        )
+        feat_bev = self.first_conv(feat_bev)
+        ele = self.reg_head(feat_bev)
+        if hasattr(self, 'normoutput'):
+            print("helllaaa")
+            ele = self.normoutput(ele)  # [-1, 1]
+        """
+        feat_bev = self.effnet_reg(feat_bev)
+        ele = self.final_conv(feat_bev) """
+
+        return ele.squeeze(1)  # [B, Z, X]

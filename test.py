@@ -43,8 +43,13 @@ def test_sample(test_loader):
         print("predictions",pred.shape)
         print("Ground truth",ele_gt.shape)
 
-        CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(pred.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + str(cur_time.item()) + '_pred')
-        CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + str(cur_time.item()) + '_gt')
+        vmin = torch.min(ele_gt[ele_mask>0]).item()
+        vmax = torch.max(ele_gt[ele_mask>0]).item()
+        if args.regression:
+            pred = pred[:, 0, :, :] # B, H, W
+
+        CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(pred.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Testimage/' + str(cur_time.item()) + '_pred', vmin= vmin, vmax=vmax)
+        CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Testimage/' + str(cur_time.item()) + '_gt' )
         
         ender.record()
         torch.cuda.synchronize()
@@ -66,6 +71,7 @@ if __name__ == '__main__':
     parser.add_argument('--cla_res', type=float, default=0.5, help='class resolution for elevation classification')
     parser.add_argument('--loadckpt', default='./checkpoints/20240407064559/checkpoint_epoch50_007500.ckpt', help='load the weights from a specific checkpoint')
     parser.add_argument('--seed', type=int, default=837, metavar='S', help='random seed')
+    parser.add_argument('--regression', type = bool, help='if set, use regression loss instead of classification loss adn the regression head instead of the classification head')
 
     # parse arguments, set seeds
     args = parser.parse_args()
@@ -84,9 +90,11 @@ if __name__ == '__main__':
         print('Testing RoadBEV-mono!')
 
     # dataset, dataloader
+    test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset', split_file='/media/T7/cariad dataset/difficultsamples.txt', mode='test', down_scale=args.down_scale)
+
     #test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
-    test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='test', down_scale=args.down_scale)
-    #test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_sb', mode='test', down_scale=args.down_scale)
+    #test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='test', down_scale=args.down_scale)
+    #test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
     test_loader = DataLoader(test_set, 1, shuffle=False, num_workers=1, drop_last=False, pin_memory=True)
     print('test set:', len(test_set))
 
@@ -95,7 +103,8 @@ if __name__ == '__main__':
     voxel_ele_res = test_set.grid_res[1]
     num_grids = [test_set.num_grids_x, test_set.num_grids_y, test_set.num_grids_z]
 
-    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res).cuda()
+
+    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression).cuda()
     print('num params:', sum(p.numel() for p in model.parameters() if p.requires_grad))
     metric = Metric(ele_range, test_set.num_grids_z, distance_wise=True)
 

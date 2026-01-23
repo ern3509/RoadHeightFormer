@@ -8,7 +8,7 @@ import torch.utils.data
 from tqdm import tqdm
 from utils.dataset import RSRD
 from torch.cuda.amp import GradScaler
-from models.loss import MyLoss
+from models.loss import MyLoss, LossReg, LossReg2
 from torch.utils.data import DataLoader
 from models.model import Elevation
 import pickle
@@ -64,23 +64,27 @@ class EarlyStopping:
             if self.counter >= self.patience:
                 self.should_stop = True
 
-
-def train():
+def train_regression():
+    print("Training with regression loss")
     run = wandb.init(
         entity = "erwan-adonie-njike-ndjongang-cariad",
         project = "RoadHeightFormer",
         name = "experiment " + str(now.year) +  str(now.month) + "/" +  str(now.hour) + ":" + str(now.minute),
+        notes = args.notes,
         config ={
             "learning_rate" : 8e-4,
             "epochs": args.epochs,
             "dataset": args.dataset,
             "trainloader length": len(train_loader),
             "testloader length": len(test_loader),
+            "scheduler" : "ReduceLROnPlateau" if args.regression else "OneCycleLR",
     })
     global_step = -1
     logged_train_static = False
     gt_vmax = [0, 0, 0]
     gt_vmin = [14, 14, 14]
+    logged_eval_static = False
+
     for epoch_idx in tqdm(range(args.epochs)):
         
         with tqdm(total=len(train_loader), desc=f"Epoch {epoch_idx+1}", unit="batch") as pbar:
@@ -100,6 +104,7 @@ def train():
                         ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
                     else:
                         ele_pred = model(imgs_left, proj_index_left)
+                        print("train ele pred shape:", ele_pred.shape)
                         ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
                     loss_all = loss_func(ele_pred, ele_gt, ele_mask)
 
@@ -108,7 +113,218 @@ def train():
                 if global_step % 5 == 0:
                     log_dict = {}
                     
-                    for s in range(1):
+                    for s in range(len(fixed_train_indices)):
+                        
+                        # Log static data ONCE
+                        if not logged_train_static:
+                            log_dict[f"train/static/sample_{s}/image"] = \
+                            wandb_rgb_image(train_imgs_fixed[s], caption=f"Train image sample {s}")
+                            gt_np = np.ma.masked_where(
+                                train_mask_fixed[s].cpu().numpy() == 0,
+                                train_gt_fixed[s].cpu().numpy(),
+                            )
+
+                            gt_vmin[s] = gt_np.min()
+                            gt_vmax[s] = gt_np.max()
+
+                            log_dict[f"train/static/sample_{s}/gt"] = \
+                                wandb_heightmap_image(train_gt_fixed[s], train_mask_fixed[s], caption="GT (cm)", vmin = gt_vmin[s], vmax = gt_vmax[s])
+
+                            
+
+                # # Log predictions WITH SLIDER
+                # for s in range(3):
+                        print("ele pred fixed shape:", ele_pred_fixed.shape)
+                        height_prediction = ele_pred_fixed[s, 0]	
+                        img = wandb_heightmap_image(
+                                height_prediction.squeeze(),
+                                train_mask_fixed[s],  #Erwan; Change it to none tensor to see full prediction even on unmasked areas.
+                                caption=f"step {global_step}", vmin = gt_vmin[s], vmax = gt_vmax[s]
+                            )
+                        error_img = wandb_error_map(height_prediction.squeeze(), train_gt_fixed[s], train_mask_fixed[s], caption=f"Error map at step {global_step} of sample {s}")
+                        wandb.log({"train/error_map_sample_" + str(s): error_img}, step=global_step)
+                        wandb.log({"train/pred_sample_" + str(s): img}, step=global_step)
+
+                    logged_train_static = True
+                    wandb.log(log_dict, step=global_step)
+                scaler.scale(loss_all).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                if args.regression and args.scheduler == 'reduceonplaeau':
+                    scheduler.step(loss_all.data.item())
+                else:
+                    scheduler.step()
+                epoch_active_time = time.time() - start_time
+                loss_wandb = loss_all.data.item()
+                if np.isnan(loss_wandb):
+                    print('nan loss!')
+                    exit()
+                print("loss has been logged")
+                wandb.log({"loss": loss_wandb}, step = global_step)
+
+                if global_step % args.summary_freq == 0:
+                    loss_data = loss_all.data.item()
+                    if np.isnan(loss_data):
+                        print('nan loss!')
+                        exit()
+                    info = 'train--> epoch%2d, lr:%.6f, loss:%.4f' % (epoch_idx+1, optimizer.param_groups[0]['lr'], loss_data)
+                    log_file.write(info + '\n')
+                    log_file.flush()
+                    [metric_all, _], eval_loss = test_sample_regression(test_loader, global_step, run, logged_eval_static)
+                    wandb.log({"eval_loss": eval_loss}, step = global_step)
+                    wandb.log({"metric_abs": metric_all[0]}, step = global_step)
+                    wandb.log({"metric_rmse": metric_all[1]}, step = global_step)
+                    wandb.log({"metric_gt05cm": metric_all[2]}, step = global_step)
+                    print(info)
+
+                if global_step % (3*args.summary_freq) == 0:
+                    torch.save(model.state_dict(), "{}/checkpoint_epoch{:0>2}_{:0>6}.ckpt".format(args.logdir, epoch_idx+1, global_step))
+
+                    torch.cuda.empty_cache()
+                   
+                    
+
+                    early_stopping(eval_loss)
+                    
+
+                    info = 'test:    abs_err:%.3f, rmse:%.3f, >0.5cm:%.2f, eval_loss:%.3f' % (metric_all[0], metric_all[1], metric_all[2]*100, eval_loss)
+                    log_file.write(info + '\n')
+                    log_file.flush()
+                    print(info)
+                epoch_passiv_time = time.time() - epoch_active_time
+                #run.log({"epoch_log_time": epoch_passiv_time, "epoch_active_time": epoch_active_time})
+            pbar.update(1)
+            # if early_stopping.should_stop:
+            #     print("Early stopping triggered!")
+            #     break
+    run.finish()
+@make_nograd_func
+def test_sample_regression(test_loader, global_step, run, logged_eval_static):
+    model.eval()
+    eval_loss = 0.0
+    gt_vmin = [0, 0, 0]
+    gt_vmax = [14, 14, 14]
+    for i, sample in enumerate(test_loader):
+        if args.stereo:
+            (imgs_left, imgs_right, ele_gt, ele_mask, proj_index_left, proj_index_right, _) = sample
+            imgs_right, proj_index_right = imgs_right.cuda(), proj_index_right.cuda()
+        else:
+            (imgs_left, ele_gt, ele_mask, proj_index_left, _) = sample
+        imgs_left, ele_gt, ele_mask, proj_index_left = imgs_left.cuda(), ele_gt.cuda(), ele_mask.cuda(), proj_index_left.cuda()
+        
+        with torch.cuda.amp.autocast(dtype=torch.float16):
+
+            if args.stereo:
+                ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
+            else:
+                ele_pred = model(imgs_left, proj_index_left)
+                ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
+                ele_pred = ele_pred[:, 0, :, :] #from B, 2, H, W to B, H, W
+                ele_pred_fixed = ele_pred_fixed[:, 0, :, :]
+            metric.compute(ele_pred, ele_gt, ele_mask)
+            #print("youuuu", ele_pred.shape, ele_gt.shape)
+            #ele_pred = torch.tensor(ele_pred.unsqueeze(dim=0))
+            loss_all = sum_absolute_error(ele_pred[ele_mask > 0], ele_gt[ele_mask > 0]) / ele_mask.sum().item()
+            log_dict = {}
+            if i == 0:
+                # Log static data ONCE
+                if not logged_eval_static:
+                    for s in range(len(fixed_eval_indices)):
+                        gt_np = np.ma.masked_where(
+                                eval_mask_fixed[s].cpu().numpy() == 0,
+                                eval_gt_fixed[s].cpu().numpy(),
+                            )
+                        gt_vmin[s] = gt_np.min()
+                        gt_vmax[s] = gt_np.max()
+                        print("gt min and max:", gt_vmin[s], gt_vmax[s])
+                        log_dict[f"eval/static/sample_{s}/image"] = \
+                            wandb_rgb_image(eval_imgs_fixed[s], caption="Eval image")
+
+                        log_dict[f"eval/static/sample_{s}/gt"] = \
+                            wandb_heightmap_image(eval_gt_fixed[s], eval_mask_fixed[s], caption="GT (cm)")
+
+                    logged_eval_static = True
+
+                # Log predictions WITH SLIDER
+                for s in range(len(fixed_eval_indices)):
+                    height_prediction = ele_pred_fixed[s]	
+                    print("height prediction before softmax shape:", height_prediction.shape)
+                    #height_prediction = torch.sum(height_prediction * model.ele_values[0],dim=0)
+                    img = wandb_heightmap_image(
+                            height_prediction.squeeze(),
+                            torch.ones_like(height_prediction),
+                            caption=f"step {global_step}",
+                            vmin= gt_vmin[s],
+                            vmax= gt_vmax[s]
+                        )
+                    error_img = wandb_error_map(height_prediction.squeeze(), eval_gt_fixed[s], eval_mask_fixed[s], caption=f"Error map at step {global_step} of sample {s}")
+                    wandb.log({"eval/pred_sample_" + str(s): img}, step=global_step)
+                    wandb.log({"eval/error_map_sample_" + str(s): error_img}, step=global_step)
+
+                wandb.log(log_dict, step=global_step)
+
+                #CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(img_prob.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_pred' + global_step.__str__() + '.png')
+                #CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_gt' + global_step.__str__() + '.png')
+            
+            
+            eval_loss += loss_all
+
+    model.train()
+    metric_values = metric.get_metric()
+    metric.clear()
+    eval_loss /= len(test_loader)
+    return metric_values, eval_loss
+def train():
+    print("Train classificationmodel")
+    run = wandb.init(
+        entity = "erwan-adonie-njike-ndjongang-cariad",
+        project = "RoadHeightFormer",
+        name = "experiment " + str(now.year) +  str(now.month) + "/" +  str(now.hour) + ":" + str(now.minute),
+        notes = args.notes,
+        config ={
+            "learning_rate" : 8e-4,
+            "epochs": args.epochs,
+            "dataset": args.dataset,
+            "trainloader length": len(train_loader),
+            "testloader length": len(test_loader),
+            "scheduler" : "ReduceLROnPlateau" if args.regression else "OneCycleLR",
+    })
+    global_step = -1
+    logged_train_static = False
+    gt_vmax = [0, 0, 0]
+    gt_vmin = [14, 14, 14]
+    logged_eval_static = False
+    for epoch_idx in tqdm(range(args.epochs)):
+        
+        with tqdm(total=len(train_loader), desc=f"Epoch {epoch_idx+1}", unit="batch") as pbar:
+            for i, sample in enumerate(train_loader):
+                global_step += 1
+                start_time = time.time()
+                if args.stereo:
+                    (imgs_left, imgs_right, ele_gt, ele_mask, proj_index_left, proj_index_right, _) = sample
+                    imgs_right, proj_index_right = imgs_right.cuda(), proj_index_right.cuda()
+                else:
+                    (imgs_left, ele_gt, ele_mask, proj_index_left, _) = sample
+                imgs_left, ele_gt, ele_mask, proj_index_left = imgs_left.cuda(), ele_gt.cuda(), ele_mask.cuda(), proj_index_left.cuda()
+
+                optimizer.zero_grad()
+                with torch.cuda.amp.autocast(dtype=torch.float16):
+                    if args.stereo:
+                        ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
+                    else:
+                        ele_pred = model(imgs_left, proj_index_left)
+                        print("train ele pred shape:", ele_pred.shape)
+                        ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
+                    loss_all = loss_func(ele_pred, ele_gt, ele_mask)
+
+                
+            #/****logging ***********************
+                if global_step % 5 == 0:
+                    log_dict = {}
+                    
+                    for s in range(len(fixed_train_indices)):
                         
                         # Log static data ONCE
                         if not logged_train_static:
@@ -130,14 +346,13 @@ def train():
                 # # Log predictions WITH SLIDER
                 # for s in range(3):
                         print("ele pred fixed shape:", ele_pred_fixed.shape)	
-                        height_prediction = F.softmax(ele_pred_fixed[s], dim=0)  #ele pred shape: B(number of samples), num_classes, H, W,  #height prediction shape: num_classes, H, W
+                        height_prediction = F.softmax(ele_pred_fixed[s], dim=0)  #for classification ele pred shape: B(number of samples), num_classes, H, W,  #height prediction shape: num_classes, H, W
                         print("height prediction shape:", height_prediction.shape)
                         height_prediction = torch.sum(height_prediction * model.ele_values[0],dim=0) #shape after sum: H, W
-                        print("model.ele_values shape:", model.ele_values.shape) #shape: num_classes
                         print("height prediction after sum shape:", height_prediction.shape)
                         img = wandb_heightmap_image(
                                 height_prediction.squeeze(),
-                                train_mask_fixed[s],
+                                train_mask_fixed[s],  
                                 caption=f"step {global_step}", vmin = gt_vmin[s], vmax = gt_vmax[s]
                             )
                         error_img = wandb_error_map(height_prediction.squeeze(), train_gt_fixed[s], train_mask_fixed[s], caption=f"Error map at step {global_step} of sample {s}")
@@ -174,7 +389,7 @@ def train():
                     torch.save(model.state_dict(), "{}/checkpoint_epoch{:0>2}_{:0>6}.ckpt".format(args.logdir, epoch_idx+1, global_step))
 
                     torch.cuda.empty_cache()
-                    [metric_all, _], eval_loss = test_sample(test_loader, global_step, run)
+                    [metric_all, _], eval_loss = test_sample(test_loader, global_step, run, logged_eval_static)
                     wandb.log({"eval_loss": eval_loss}, step = global_step)
                     wandb.log({"metric_abs": metric_all[0]}, step = global_step)
                     wandb.log({"metric_rmse": metric_all[1]}, step = global_step)
@@ -195,10 +410,12 @@ def train():
                 break
     run.finish()
 @make_nograd_func
-def test_sample(test_loader, global_step, run):
+def test_sample(test_loader, global_step, run, logged_eval_static=False):
     model.eval()
     eval_loss = 0.0
-    logged_eval_static = False
+    gt_vmin = [0, 0, 0]
+    gt_vmax = [14, 14, 14]
+    
 
     for i, sample in enumerate(test_loader):
         if args.stereo:
@@ -223,7 +440,14 @@ def test_sample(test_loader, global_step, run):
             if i == 0:
                 # Log static data ONCE
                 if not logged_eval_static:
-                    for s in range(1):
+                    for s in range(len(fixed_eval_indices)):
+                        gt_np = np.ma.masked_where(
+                                eval_mask_fixed[s].cpu().numpy() == 0,
+                                eval_gt_fixed[s].cpu().numpy(),
+                            )
+                        gt_vmin[s] = gt_np.min()
+                        gt_vmax[s] = gt_np.max()
+
                         log_dict[f"eval/static/sample_{s}/image"] = \
                             wandb_rgb_image(eval_imgs_fixed[s], caption="Eval image")
 
@@ -234,14 +458,16 @@ def test_sample(test_loader, global_step, run):
 
                 # Log predictions WITH SLIDER
                 pred_images = []
-                for s in range(1):
+                for s in range(len(fixed_eval_indices)):
                     height_prediction = ele_pred_fixed[s]	
                     print("height prediction before softmax shape:", height_prediction.shape)
                     #height_prediction = torch.sum(height_prediction * model.ele_values[0],dim=0)
                     img = wandb_heightmap_image(
                             height_prediction.squeeze(),
-                            eval_mask_fixed[s],
-                            caption=f"step {global_step}"
+                            torch.ones_like(height_prediction),
+                            caption=f"step {global_step}",
+                            vmin=gt_vmin[s],
+                            vmax=gt_vmax[s]
                         )
                     error_img = wandb_error_map(height_prediction.squeeze(), eval_gt_fixed[s], eval_mask_fixed[s], caption=f"Error map at step {global_step} of sample {s}")
                     wandb.log({"eval/pred_sample_" + str(s): img}, step=global_step)
@@ -254,6 +480,7 @@ def test_sample(test_loader, global_step, run):
             
             
             eval_loss += loss_all
+
     model.train()
     metric_values = metric.get_metric()
     metric.clear()
@@ -266,8 +493,8 @@ def wandb_error_map(
     mask: torch.Tensor,
     caption: str = "",
     cmap: str = "RdBu_r",
-    vmin: float | None = None,
-    vmax: float | None = None,
+    vmin: float = None,
+    vmax: float = None,
 ) -> wandb.Image:
     """
     Compute per-cell error (pred - gt) and return as wandb.Image.
@@ -360,12 +587,18 @@ if __name__ == '__main__':
     parser.add_argument('--stereo', action='store_true', help='if yes, use RoadBEV-stereo; otherwise, RoadBEV-mono')
     parser.add_argument('--cla_res', type=float, default=0.5, help='class resolution for elevation classification')
     parser.add_argument('--batch_size', type=int, default=8, help='training batch size')
-    parser.add_argument('--lr', type=float, default=8e-4, help='maximum learning rate')
+    parser.add_argument('--lr', type=float, default=1e-4, help='maximum learning rate')
     parser.add_argument('--epochs', type=int, default=50, help='number of epochs to train')
     parser.add_argument('--logdir', default='./checkpoints/', help='the directory to save logs and checkpoints')
     parser.add_argument('--loadckpt', default=None, help='load the weights from a specific checkpoint')
-    parser.add_argument('--summary_freq', type=int, default=70, help='summary_freq')
+    parser.add_argument('--summary_freq', type=int, default=1500, help='summary_freq')
     parser.add_argument('--seed', type=int, default=307, metavar='S', help='random seed')
+    parser.add_argument('--regression', type=bool, default=False, help='regression or classification')
+    parser.add_argument('--backbone',default='efficientnet', help='Use DepthAnything3 backbone or EfficientNet')
+    parser.add_argument('--gradient_weight', type=float, default=0.01, help='weight for gradient loss in regression')
+    parser.add_argument('--notes', type=str, default='', help='notes for wandb run')
+    parser.add_argument('--scheduler', type=str, default='onecycle', help='type of lr scheduler to use: onecycle or reduceonplateau')
+    parser.add_argument('--loss', type=str, default='L1', help='type of loss to use if regression: L1, gaussian NLL')
 
     # parse arguments, set seeds
     args = parser.parse_args()
@@ -388,12 +621,22 @@ if __name__ == '__main__':
         train_set = RSRD(training=True, stereo=args.stereo, down_scale=args.down_scale)
         test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
 
+    elif 'CARDSetV2Small' in args.dataset:
+        test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
+        train_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='train', down_scale=args.down_scale)
+        args.batch_size = 1
+        args.summary_freq = 1
+        #args.epochs = 20
+
+    elif 'CARDSet' in args.dataset:
+        train_set = CARDSetDataset(root_dir='/media/T7/cariad dataset', split_file='/media/T7/cariad dataset/train_all_data_clean_NN.txt', mode='train', down_scale=args.down_scale)
+        test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset', split_file='/media/T7/cariad dataset/val_all_data_clean_NN.txt', mode='test', down_scale=args.down_scale)
+    
+    
+    
     else:
-        train_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='train', down_scale=args.down_scale)
-        test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='test', down_scale=args.down_scale)
-        #test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
-        #train_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='train', down_scale=args.down_scale)
-    #train_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='train', down_scale=args.down_scale)
+        print('unknown dataset!')
+        exit(0)
 
     train_loader = DataLoader(train_set, args.batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=True)
     
@@ -402,8 +645,8 @@ if __name__ == '__main__':
     print('dataset size - train:%d, test:%d' % (len(train_set), len(test_set)))
 
     #get fixed sample for logging
-    fixed_train_indices = [0]  
-    fixed_eval_indices  = [0]
+    fixed_train_indices = [0]#, 2, 3]  
+    fixed_eval_indices  = [0]#,6,7]
 
     device = "cuda"
 
@@ -416,12 +659,18 @@ if __name__ == '__main__':
     ele_range = train_set.y_range
     voxel_ele_res = train_set.grid_res[1]
     num_grids = [train_set.num_grids_x, train_set.num_grids_y, train_set.num_grids_z]
-    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res).cuda()
-    early_stopping = EarlyStopping(patience=5, min_delta=0.001)
+    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone).cuda()
+    early_stopping = EarlyStopping(patience=300, min_delta=0.001)
     print('num params:', sum(p.numel() for p in model.parameters() if p.requires_grad))
     model.train()
 
-    loss_func = MyLoss(ele_range, voxel_ele_res, args.cla_res).cuda()
+    if args.regression:
+        if args.loss == 'L1':
+            loss_func = LossReg(ele_range).cuda()
+        else:
+            loss_func = LossReg2(ele_range, args.gradient_weight).cuda()
+    else:
+        loss_func = MyLoss(ele_range, voxel_ele_res, args.cla_res).cuda()
     metric = Metric(ele_range, train_set.num_grids_z, distance_wise=False)
 
     url = 'https://download.pytorch.org/models/efficientnet_b6_lukemelas-c76e70fd.pth'
@@ -446,10 +695,20 @@ if __name__ == '__main__':
 
     scaler = GradScaler()
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, epochs=args.epochs, pct_start=0.02,
-                                                    three_phase=False,
-                                                    div_factor=20, anneal_strategy='linear',
-                                                    steps_per_epoch=len(train_loader))
+
+    if args.scheduler == 'reduceonplaeau':
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=5,
+        min_lr=1e-6
+    )
+    else: 
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, epochs=args.epochs, pct_start=0.02,
+                                                        three_phase=False,
+                                                        div_factor=20, anneal_strategy='linear',
+                                                        steps_per_epoch=len(train_loader))
 
     # logging
     args.logdir = os.path.join(args.logdir, datetime.utcnow().strftime('%Y%m%d%H%M%S'))
@@ -462,7 +721,10 @@ if __name__ == '__main__':
     # shutil.copy('train.py', os.path.join(args.logdir, 'train.py'))
     log_file = open(os.path.join(args.logdir, 'log.txt'), 'a')
 
-    train()
+    if args.regression:
+        train_regression()
+    else:
+        train()
 
 
 

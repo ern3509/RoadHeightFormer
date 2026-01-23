@@ -42,3 +42,121 @@ class MyLoss(nn.Module):
         loss_ele = self.loss_func(ele_pred, class_ele)
 
         return loss_ele
+
+class LossReg(nn.Module):
+    def __init__(self, ele_range):
+        super(LossReg, self).__init__()
+        self.ele_range = ele_range*100
+        self.loss_func = nn.SmoothL1Loss(reduction='mean')
+
+
+    def forward(self, ele_pred, ele_gt, ele_mask):
+        # ele_pred: [B, H, W]
+        # ele_gt:   [B, H, W]
+        # ele_mask: [B, H, W]
+
+        ele_mask_roi = torch.logical_and(ele_gt > -1000, ele_gt < 1000)
+        ele_mask = torch.logical_and(ele_mask_roi, ele_mask)
+
+        print("Regression Loss:L1")
+        ele_pred = ele_pred[:, 0:1].squeeze(1)[ele_mask]
+        ele_gt = ele_gt[ele_mask]
+        gt_min = - self.ele_range
+        gt_max = self.ele_range
+        normalized_pred = True
+        if normalized_pred:
+            pred_scaled = ele_pred * (gt_max - gt_min) / 2 + (gt_max + gt_min) / 2
+
+            assert(pred_scaled.shape == ele_pred.shape)
+            loss = self.loss_func(pred_scaled, ele_gt)
+        else:
+            loss = self.loss_func(ele_pred, ele_gt)
+
+        return loss
+    
+class GradientLoss(nn.Module):
+    """
+    Computes L1 loss between spatial gradients of prediction and ground truth.
+    """
+
+    def __init__(self):
+        super().__init__()
+    @staticmethod
+    def gradient_x(img):
+        return img[:, :, :, 1:] - img[:, :, :, :-1]
+
+    @staticmethod
+    def gradient_y(img):
+        return img[:, :, 1:, :] - img[:, :, :-1, :]
+
+    def forward(self, pred, gt, mask):
+        """
+        pred: (B, 1, H, W)
+        gt:   (B, 1, H, W)
+        mask: (B, 1, H, W) boolean
+        """
+
+        pred_dx = self.gradient_x(pred)
+        pred_dy = self.gradient_y(pred)
+
+        gt_dx = self.gradient_x(gt)
+        gt_dy = self.gradient_y(gt)
+
+        # Gradient masks (both neighboring pixels must be valid)
+        mask_dx = mask[:, :, :, 1:] & mask[:, :, :, :-1]
+        mask_dy = mask[:, :, 1:, :] & mask[:, :, :-1, :]
+
+        loss_x = torch.abs(pred_dx - gt_dx)[mask_dx].mean()
+        loss_y = torch.abs(pred_dy - gt_dy)[mask_dy].mean()
+
+        return loss_x + loss_y
+
+class HeteroscedasticNLLLoss(nn.Module):
+    """
+    Gaussian negative log-likelihood loss with learned per-pixel variance.
+    """
+
+    def __init__(self, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, pred, gt, mask):
+        """
+        pred: (B, 2, H, W)
+        gt:   (B, 1, H, W)
+        mask: (B, 1, H, W) boolean
+        """
+        mean = pred[:, 0:1]
+        var  = pred[:, 1:2]
+
+        var = F.softplus(var) + self.eps
+
+        nll = (gt - mean) ** 2 / (2.0 * var) + 0.5 * torch.log(var)
+
+        return nll[mask].mean()
+    
+    
+class LossReg2(nn.Module): #neg loglik + gradient loss
+    def __init__(self, ele_range, gradient_weight=0.01):
+        super(LossReg2, self).__init__()
+        self.gradientloss = GradientLoss()
+        self.nll = HeteroscedasticNLLLoss()
+        self.ele_range = ele_range*100
+        self.gradient_weight = gradient_weight
+        self.l1loss = nn.L1Loss(reduction='mean')
+    def forward(self, ele_pred, ele_gt, ele_mask):
+        # ele_pred: [B, 2, H, W]  mean and variance
+        # ele_gt:   [B, H, W]
+        # ele_mask: [B, H, W]
+
+        # Valid value range mask
+        roi_mask = torch.logical_and((ele_gt > -self.ele_range),(ele_gt < self.ele_range))
+        mask = torch.logical_and(roi_mask,ele_mask)
+        mask = mask.unsqueeze(1)  # (B, 1, H, W)
+
+        ele_gt = ele_gt.unsqueeze(1)
+
+        loss_nll = self.nll(ele_pred, ele_gt, mask)
+        loss_grad = self.gradientloss(ele_pred[:, 0:1], ele_gt, mask)
+
+        return loss_nll + self.gradient_weight * loss_grad

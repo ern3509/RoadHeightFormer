@@ -67,6 +67,10 @@ class Metric():
         print("check the mask_roi",ele_mask.sum())
         print("ele_gt", ele_gt.shape, ele_gt.shape)
 
+        # Skip computation if ele_mask is zero
+        if ele_mask.sum() == 0:
+            print("Skipping computation due to zero ele_mask")
+            return
 
         self.count_all += 1
         self.metric_all += self.compute_values(ele_gt[ele_mask], ele_pred[ele_mask])
