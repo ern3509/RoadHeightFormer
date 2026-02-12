@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from models.submodule import *
 from .efficientnet import efficientnet_cla
+from utils.experiment import save_feature_map
 
 class EleCla2D(nn.Module):
     def __init__(self, feat_channel, num_grids, num_classes):
@@ -94,7 +95,7 @@ class EleCla3D(nn.Module):
         return prob_volume
 
 class EleReg2D(nn.Module):
-    def __init__(self, feat_channel, num_grids, normalize=False):
+    def __init__(self, feat_channel, num_grids, normalize):
         super(EleReg2D, self).__init__()
         self.num_grids_x, self.num_grids_y, self.num_grids_z = num_grids
         self.channel_reshaped = feat_channel * self.num_grids_y
@@ -110,38 +111,44 @@ class EleReg2D(nn.Module):
             nn.BatchNorm2d(self.inplanes // 4),
             nn.ReLU(inplace=True),
 
-            nn.Conv2d(self.inplanes // 4, 2, kernel_size=1, bias=True)
+            nn.Conv2d(self.inplanes // 4, 1, kernel_size=1, bias=True)
         )
         self.first_conv = nn.Sequential(
-            convbn(self.channel_reshaped, self.inplanes, 5, 1, 2, 1),
+            convbn(self.channel_reshaped, self.inplanes, 3, 1, 1, 1), #nn.Conv2d(self.channel_reshaped, self.inplanes, 3, 1, 1, bias= True),#
             nn.ReLU(inplace=True)
         )
         if normalize:
+            print("EleReg2D: using Tanh normalization for output elevation")
             self.normoutput = nn.Tanh()
-        """self.effnet_reg = efficientnet_cla(self.inplanes, 2)
-
-        self.final_conv = nn.Sequential(
-            convbn(2, 2, 3, 1, 1, 1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(2, 2, kernel_size=1, stride=1, padding=0, bias=False)
-        ) """
+       
 
     def forward(self, feat_voxel):
         # feat_voxel: [B, C, Z, X, Y]
         B = feat_voxel.shape[0]
         print("EleReg2D: feat_voxel shape:", feat_voxel.shape)
-
         feat_bev = feat_voxel.permute(0, 4, 1, 2, 3)
         feat_bev = feat_bev.reshape(
             B, self.channel_reshaped, self.num_grids_z, self.num_grids_x
         )
+
+        for name, param in self.first_conv.named_parameters():
+            print(f"{name}: max={param.max().item()}, min={param.min().item()}")
+        for name, param in self.first_conv[0].named_parameters():
+            if "running_mean" in name or "running_var" in name:
+                print(f"{name}: {param}")
+        print("Range of feat_bev before first_conv:", feat_bev.min().item(), feat_bev.max().item())
+        #save_feature_map(feat_bev[0, 0], "input_to_first_conv.png")
         feat_bev = self.first_conv(feat_bev)
+        print("Range of first_conv output:", feat_bev.min().item(), feat_bev.max().item())
+        print("check nan after first conv", torch.sum(torch.isnan(feat_bev)))
+        #save_feature_map(feat_bev[0, 0], "feat_bev_ele_reg2d")
         ele = self.reg_head(feat_bev)
+        save_feature_map(ele[0, 0], "ele_map_before_norm_ele_reg2d")
         if hasattr(self, 'normoutput'):
             print("helllaaa")
             ele = self.normoutput(ele)  # [-1, 1]
         """
         feat_bev = self.effnet_reg(feat_bev)
         ele = self.final_conv(feat_bev) """
-
+        #print(ele[0, 0, 1, :])
         return ele.squeeze(1)  # [B, Z, X]

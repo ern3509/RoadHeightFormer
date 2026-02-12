@@ -64,20 +64,30 @@ class EarlyStopping:
             if self.counter >= self.patience:
                 self.should_stop = True
 
+def unnormalize(ele_pred, h_min, h_max):
+    height = ele_pred[:, 0:1]  # keep channel dim
+    height = height * ((h_max - h_min) / 2) + ((h_max + h_min) / 2)
+    ele_pred = torch.cat([height, ele_pred[:, 1:2]], dim=1)
+
+    return ele_pred
+
 def train_regression():
     print("Training with regression loss")
     run = wandb.init(
         entity = "erwan-adonie-njike-ndjongang-cariad",
         project = "RoadHeightFormer",
-        name = "experiment " + str(now.year) +  str(now.month) + "/" +  str(now.hour) + ":" + str(now.minute),
+        name = args.name_run +  str(now.month) + '/' + str(now.day),
         notes = args.notes,
         config ={
-            "learning_rate" : 8e-4,
+            "learning_rate" : args.lr,
             "epochs": args.epochs,
             "dataset": args.dataset,
             "trainloader length": len(train_loader),
             "testloader length": len(test_loader),
-            "scheduler" : "ReduceLROnPlateau" if args.regression else "OneCycleLR",
+            "scheduler" : args.scheduler,
+            "backbone" : args.backbone,
+            "loss_function" : args.loss,
+            "Batch_size" : 16,
     })
     global_step = -1
     logged_train_static = False
@@ -104,9 +114,16 @@ def train_regression():
                         ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
                     else:
                         ele_pred = model(imgs_left, proj_index_left)
-                        print("train ele pred shape:", ele_pred.shape)
+                        #print("train ele pred shape:", ele_pred.shape)
                         ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
+                    
+                    
                     loss_all = loss_func(ele_pred, ele_gt, ele_mask)
+                    if args.normalize:
+                        h_min = - ele_range * 100
+                        h_max = ele_range * 100                        
+                        ele_pred_fixed = unnormalize(ele_pred_fixed, h_min, h_max)
+                        print("max and min after normalization:", ele_pred_fixed.max().item(), ele_pred_fixed.min().item())
 
                 
             #/****logging ***********************
@@ -135,10 +152,10 @@ def train_regression():
                 # # Log predictions WITH SLIDER
                 # for s in range(3):
                         print("ele pred fixed shape:", ele_pred_fixed.shape)
-                        height_prediction = ele_pred_fixed[s, 0]	
+                        height_prediction = ele_pred_fixed[s]#, 0]	
                         img = wandb_heightmap_image(
                                 height_prediction.squeeze(),
-                                train_mask_fixed[s],  #Erwan; Change it to none tensor to see full prediction even on unmasked areas.
+                                train_mask_fixed[s],  
                                 caption=f"step {global_step}", vmin = gt_vmin[s], vmax = gt_vmax[s]
                             )
                         error_img = wandb_error_map(height_prediction.squeeze(), train_gt_fixed[s], train_mask_fixed[s], caption=f"Error map at step {global_step} of sample {s}")
@@ -152,24 +169,34 @@ def train_regression():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 scaler.step(optimizer)
                 scaler.update()
+
+
                 if args.regression and args.scheduler == 'reduceonplaeau':
                     scheduler.step(loss_all.data.item())
                 else:
                     scheduler.step()
+
+
                 epoch_active_time = time.time() - start_time
                 loss_wandb = loss_all.data.item()
+
                 if np.isnan(loss_wandb):
                     print('nan loss!')
+                    torch.save(model.state_dict(), "modelbeforebreak.ckpt")
                     exit()
                 print("loss has been logged")
                 wandb.log({"loss": loss_wandb}, step = global_step)
 
-                if global_step % args.summary_freq == 0:
-                    loss_data = loss_all.data.item()
+                info = 'train--> epoch%2d, lr:%.6f, loss:%.4f' % (epoch_idx+1, optimizer.param_groups[0]['lr'], loss_wandb)
+                print(info)
+
+
+                if global_step % (args.summary_freq/10) == 0:
+                    """    loss_data = loss_all.data.item()
                     if np.isnan(loss_data):
                         print('nan loss!')
-                        exit()
-                    info = 'train--> epoch%2d, lr:%.6f, loss:%.4f' % (epoch_idx+1, optimizer.param_groups[0]['lr'], loss_data)
+                        exit() 
+                    """
                     log_file.write(info + '\n')
                     log_file.flush()
                     [metric_all, _], eval_loss = test_sample_regression(test_loader, global_step, run, logged_eval_static)
@@ -177,9 +204,8 @@ def train_regression():
                     wandb.log({"metric_abs": metric_all[0]}, step = global_step)
                     wandb.log({"metric_rmse": metric_all[1]}, step = global_step)
                     wandb.log({"metric_gt05cm": metric_all[2]}, step = global_step)
-                    print(info)
 
-                if global_step % (3*args.summary_freq) == 0:
+                if global_step % (5*args.summary_freq) == 0:
                     torch.save(model.state_dict(), "{}/checkpoint_epoch{:0>2}_{:0>6}.ckpt".format(args.logdir, epoch_idx+1, global_step))
 
                     torch.cuda.empty_cache()
@@ -193,8 +219,6 @@ def train_regression():
                     log_file.write(info + '\n')
                     log_file.flush()
                     print(info)
-                epoch_passiv_time = time.time() - epoch_active_time
-                #run.log({"epoch_log_time": epoch_passiv_time, "epoch_active_time": epoch_active_time})
             pbar.update(1)
             # if early_stopping.should_stop:
             #     print("Early stopping triggered!")
@@ -221,11 +245,18 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
             else:
                 ele_pred = model(imgs_left, proj_index_left)
                 ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
-                ele_pred = ele_pred[:, 0, :, :] #from B, 2, H, W to B, H, W
-                ele_pred_fixed = ele_pred_fixed[:, 0, :, :]
+                #ele_pred = ele_pred[:, 0, :, :] #from B, 2, H, W to B, H, W
+                #ele_pred_fixed = ele_pred_fixed[:, 0, :, :]
+            
+            if args.normalize:
+                print("undo normalization in testing")
+                h_min = - ele_range*100
+                h_max = ele_range*100
+                ele_pred = ele_pred * ((h_max - h_min) / 2) + ((h_max + h_min) / 2)
+                ele_pred_fixed = ele_pred_fixed * ((h_max - h_min) / 2) + ((h_max + h_min) / 2)
+
             metric.compute(ele_pred, ele_gt, ele_mask)
-            #print("youuuu", ele_pred.shape, ele_gt.shape)
-            #ele_pred = torch.tensor(ele_pred.unsqueeze(dim=0))
+            
             loss_all = sum_absolute_error(ele_pred[ele_mask > 0], ele_gt[ele_mask > 0]) / ele_mask.sum().item()
             log_dict = {}
             if i == 0:
@@ -281,7 +312,7 @@ def train():
     run = wandb.init(
         entity = "erwan-adonie-njike-ndjongang-cariad",
         project = "RoadHeightFormer",
-        name = "experiment " + str(now.year) +  str(now.month) + "/" +  str(now.hour) + ":" + str(now.minute),
+        name = args.name_run +  str(now.month) + '/' + str(now.day),
         notes = args.notes,
         config ={
             "learning_rate" : 8e-4,
@@ -386,7 +417,7 @@ def train():
                     print(info)
 
                 if global_step % (3*args.summary_freq) == 0:
-                    torch.save(model.state_dict(), "{}/checkpoint_epoch{:0>2}_{:0>6}.ckpt".format(args.logdir, epoch_idx+1, global_step))
+                    #torch.save(model.state_dict(), "{}/checkpoint_epoch{:0>2}_{:0>6}.ckpt".format(args.logdir, epoch_idx+1, global_step))
 
                     torch.cuda.empty_cache()
                     [metric_all, _], eval_loss = test_sample(test_loader, global_step, run, logged_eval_static)
@@ -533,6 +564,8 @@ def wandb_heightmap_image(height_map, mask, caption, cmap="plasma", vmin = None,
     """
     height_map, mask: torch.Tensor (H, W)
     """
+
+    print("....saving file wandb")
     height_map = height_map.detach().cpu().numpy()
     mask = mask.detach().cpu().numpy()
 
@@ -593,21 +626,24 @@ if __name__ == '__main__':
     parser.add_argument('--loadckpt', default=None, help='load the weights from a specific checkpoint')
     parser.add_argument('--summary_freq', type=int, default=1500, help='summary_freq')
     parser.add_argument('--seed', type=int, default=307, metavar='S', help='random seed')
-    parser.add_argument('--regression', type=bool, default=False, help='regression or classification')
+    parser.add_argument('--regression', action='store_true', help='regression or classification')
     parser.add_argument('--backbone',default='efficientnet', help='Use DepthAnything3 backbone or EfficientNet')
     parser.add_argument('--gradient_weight', type=float, default=0.01, help='weight for gradient loss in regression')
     parser.add_argument('--notes', type=str, default='', help='notes for wandb run')
     parser.add_argument('--scheduler', type=str, default='onecycle', help='type of lr scheduler to use: onecycle or reduceonplateau')
     parser.add_argument('--loss', type=str, default='L1', help='type of loss to use if regression: L1, gaussian NLL')
-
+    parser.add_argument('--normalize', action='store_true', help='disable normalization')
+    parser.add_argument('--name_run', type=str, default= ' ', help='give the name of the wandb run')
     # parse arguments, set seeds
     args = parser.parse_args()
     torch.backends.cudnn.enable = True
     torch.backends.cudnn.benchmark = True
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    #os.environ['CUDA_VISIBLE_DEVICES'] = '0'
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
+
+    print("normalize", args.normalize)
 
     if args.stereo:
         args.down_scale = 2
@@ -629,8 +665,8 @@ if __name__ == '__main__':
         #args.epochs = 20
 
     elif 'CARDSet' in args.dataset:
-        train_set = CARDSetDataset(root_dir='/media/T7/cariad dataset', split_file='/media/T7/cariad dataset/train_all_data_clean_NN.txt', mode='train', down_scale=args.down_scale)
-        test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset', split_file='/media/T7/cariad dataset/val_all_data_clean_NN.txt', mode='test', down_scale=args.down_scale)
+        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/RoadHeightFormer_training.txt', mode='train', down_scale=args.down_scale)
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/RoadHeightFormer_test.txt', mode='test', down_scale=args.down_scale)
     
     
     
@@ -659,14 +695,14 @@ if __name__ == '__main__':
     ele_range = train_set.y_range
     voxel_ele_res = train_set.grid_res[1]
     num_grids = [train_set.num_grids_x, train_set.num_grids_y, train_set.num_grids_z]
-    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone).cuda()
+    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize).cuda()
     early_stopping = EarlyStopping(patience=300, min_delta=0.001)
     print('num params:', sum(p.numel() for p in model.parameters() if p.requires_grad))
     model.train()
 
     if args.regression:
         if args.loss == 'L1':
-            loss_func = LossReg(ele_range).cuda()
+            loss_func = LossReg(ele_range, args.normalize).cuda()
         else:
             loss_func = LossReg2(ele_range, args.gradient_weight).cuda()
     else:
@@ -715,9 +751,10 @@ if __name__ == '__main__':
     print('logging dir:', args.logdir)
     os.makedirs(args.logdir, exist_ok=True)
     # shutil.copy('./utils/dataset.py', os.path.join(args.logdir, 'dataset.py'))
-    # shutil.copy('./models/model.py', os.path.join(args.logdir, 'model.py'))
-    # shutil.copy('./models/efficientnet.py', os.path.join(args.logdir, 'efficientnet.py'))
-    # shutil.copy('./models/ele_head.py', os.path.join(args.logdir, 'ele_head.py'))
+    shutil.copy('./models/model.py', os.path.join(args.logdir, 'model.py'))
+    shutil.copy('./models/efficientnet.py', os.path.join(args.logdir, 'efficientnet.py'))
+    shutil.copy('./models/ele_head.py', os.path.join(args.logdir, 'ele_head.py'))
+    shutil.copy('./models/patch2feature.py', os.path.join(args.logdir, 'patch2feature.py'))
     # shutil.copy('train.py', os.path.join(args.logdir, 'train.py'))
     log_file = open(os.path.join(args.logdir, 'log.txt'), 'a')
 

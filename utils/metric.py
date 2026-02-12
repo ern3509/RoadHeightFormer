@@ -65,7 +65,8 @@ class Metric():
         print("check the mask_roi",mask_roi.sum())
         ele_mask = torch.logical_and(mask_roi, mask)
         print("check the mask_roi",ele_mask.sum())
-        print("ele_gt", ele_gt.shape, ele_gt.shape)
+        print("ele_gt", ele_gt.shape,ele_pred.shape)
+        print(ele_pred.min(), ele_pred.max())
 
         # Skip computation if ele_mask is zero
         if ele_mask.sum() == 0:

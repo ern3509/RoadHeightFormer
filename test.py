@@ -18,6 +18,12 @@ from utils.experiment import *
 import numpy as np
 from CARDSet.dataset import CARDSetDataset, CARDSetDatasetV2Smalldataset
 
+def unnormalize(ele_pred, h_min, h_max):
+    height = ele_pred[:, 0:1]  # keep channel dim
+    height = height * ((h_max - h_min) / 2) + ((h_max + h_min) / 2)
+    ele_pred = torch.cat([height, ele_pred[:, 1:2]], dim=1)
+
+    return ele_pred
 
 @make_nograd_func
 def test_sample(test_loader):
@@ -45,8 +51,16 @@ def test_sample(test_loader):
 
         vmin = torch.min(ele_gt[ele_mask>0]).item()
         vmax = torch.max(ele_gt[ele_mask>0]).item()
+
+        if args.normalize:
+            h_min = - ele_range * 100
+            h_max = ele_range * 100                        
+            pred = unnormalize(pred, h_min, h_max)
+
+
         if args.regression:
-            pred = pred[:, 0, :, :] # B, H, W
+            None #pred = pred[:, 0, :, :] # B, H, W
+           
 
         CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(pred.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Testimage/' + str(cur_time.item()) + '_pred', vmin= vmin, vmax=vmax)
         CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Testimage/' + str(cur_time.item()) + '_gt' )
@@ -71,7 +85,10 @@ if __name__ == '__main__':
     parser.add_argument('--cla_res', type=float, default=0.5, help='class resolution for elevation classification')
     parser.add_argument('--loadckpt', default='./checkpoints/20240407064559/checkpoint_epoch50_007500.ckpt', help='load the weights from a specific checkpoint')
     parser.add_argument('--seed', type=int, default=837, metavar='S', help='random seed')
-    parser.add_argument('--regression', type = bool, help='if set, use regression loss instead of classification loss adn the regression head instead of the classification head')
+    parser.add_argument('--regression', action='store_true', help='regression or classification')
+    parser.add_argument('--backbone',default='efficientnet', help='Use DepthAnything3 backbone or EfficientNet')
+    parser.add_argument('--normalize', action='store_true', help='if set, normalize the height values to [-1, 1] for regression')
+    parser.add_argument('--dataset', help='dataset to use: add it to wandb runs')
 
     # parse arguments, set seeds
     args = parser.parse_args()
@@ -90,7 +107,18 @@ if __name__ == '__main__':
         print('Testing RoadBEV-mono!')
 
     # dataset, dataloader
-    test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset', split_file='/media/T7/cariad dataset/difficultsamples.txt', mode='test', down_scale=args.down_scale)
+    if "CARDSet" in args.dataset:
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/RoadHeightFormer_test.txt', mode='test', down_scale=args.down_scale)
+
+    elif 'CARDSetV2Small' in args.dataset:
+        test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
+    
+    elif 'RSRD' in args.dataset:
+        test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
+
+    else:
+        print("unknown dataset")
+        exit(0)
 
     #test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
     #test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='test', down_scale=args.down_scale)
@@ -104,7 +132,7 @@ if __name__ == '__main__':
     num_grids = [test_set.num_grids_x, test_set.num_grids_y, test_set.num_grids_z]
 
 
-    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression).cuda()
+    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize).cuda()
     print('num params:', sum(p.numel() for p in model.parameters() if p.requires_grad))
     metric = Metric(ele_range, test_set.num_grids_z, distance_wise=True)
 

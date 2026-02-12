@@ -44,28 +44,30 @@ class MyLoss(nn.Module):
         return loss_ele
 
 class LossReg(nn.Module):
-    def __init__(self, ele_range):
+    def __init__(self, ele_range, normalize=False):
         super(LossReg, self).__init__()
         self.ele_range = ele_range*100
         self.loss_func = nn.SmoothL1Loss(reduction='mean')
+        self.normalize = normalize
 
 
     def forward(self, ele_pred, ele_gt, ele_mask):
         # ele_pred: [B, H, W]
         # ele_gt:   [B, H, W]
         # ele_mask: [B, H, W]
-
+        print("Erwannnn",ele_pred.shape, ele_gt.shape, ele_mask.shape)
+        print("ele_pred is nan", torch.sum(torch.isnan(ele_pred)))
         ele_mask_roi = torch.logical_and(ele_gt > -1000, ele_gt < 1000)
         ele_mask = torch.logical_and(ele_mask_roi, ele_mask)
-
+        ele_pred = ele_pred[ele_mask]
         print("Regression Loss:L1")
-        ele_pred = ele_pred[:, 0:1].squeeze(1)[ele_mask]
+        #ele_pred = ele_pred[:, 0:1].squeeze(1)[ele_mask]
         ele_gt = ele_gt[ele_mask]
         gt_min = - self.ele_range
         gt_max = self.ele_range
-        normalized_pred = True
-        if normalized_pred:
-            pred_scaled = ele_pred * (gt_max - gt_min) / 2 + (gt_max + gt_min) / 2
+        if self.normalize:
+            print("normalized")
+            pred_scaled = (ele_pred * (gt_max - gt_min) / 2) + ((gt_max + gt_min) / 2)
 
             assert(pred_scaled.shape == ele_pred.shape)
             loss = self.loss_func(pred_scaled, ele_gt)
