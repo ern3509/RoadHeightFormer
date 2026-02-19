@@ -89,6 +89,7 @@ if __name__ == '__main__':
     parser.add_argument('--backbone',default='efficientnet', help='Use DepthAnything3 backbone or EfficientNet')
     parser.add_argument('--normalize', action='store_true', help='if set, normalize the height values to [-1, 1] for regression')
     parser.add_argument('--dataset', help='dataset to use: add it to wandb runs')
+    parser.add_argument('--pred_head_dim', type=int, default=256, help='define the bottleneck between the transformer encoder and the CNN prediction head')
 
     # parse arguments, set seeds
     args = parser.parse_args()
@@ -108,7 +109,9 @@ if __name__ == '__main__':
 
     # dataset, dataloader
     if "CARDSet" in args.dataset:
-        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/RoadHeightFormer_test.txt', mode='test', down_scale=args.down_scale)
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='test', down_scale=args.down_scale)
+
+        #test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/RoadHeightFormer_test.txt', mode='test', down_scale=args.down_scale)
 
     elif 'CARDSetV2Small' in args.dataset:
         test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
@@ -132,7 +135,8 @@ if __name__ == '__main__':
     num_grids = [test_set.num_grids_x, test_set.num_grids_y, test_set.num_grids_z]
 
 
-    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize).cuda()
+    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize, args.pred_head_dim).cuda()
+    print(model)
     print('num params:', sum(p.numel() for p in model.parameters() if p.requires_grad))
     metric = Metric(ele_range, test_set.num_grids_z, distance_wise=True)
 

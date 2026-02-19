@@ -16,3 +16,4 @@ preprocessed.zip
 checkpoints/
 CARDSet/
 models/RoabBEV-mono.ckpt
+*.png

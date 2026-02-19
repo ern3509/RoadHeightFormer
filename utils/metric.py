@@ -10,7 +10,7 @@ class Metric():
         # self.res = cla_res  # in cm
         # self.num_classes = int(2 * self.ele_range / self.res)
 
-        self.metric_all = np.zeros(3,)
+        self.metric_all = np.zeros(7,)
         self.count_all = 0
 
         # if compute the distance-wise metric in the ROI grid
@@ -56,7 +56,61 @@ class Metric():
         err_mask = abs_err > 0.5
         ratio_thresh = torch.mean(err_mask.float())
 
-        return np.array(torch.tensor([torch.mean(abs_err), rmse, ratio_thresh], device='cpu'))
+        # Log RMSE
+        epsilon = 1e-6  # Small value to avoid log(0)
+        #log_rmse = torch.sqrt(torch.mean((torch.log(ele_pred + epsilon) - torch.log(ele_gt + epsilon)) ** 2))
+
+        # Absolute error thresholds
+        abs_err_01 = torch.mean((abs_err > 0.1).float())  # Percentage of abs_err > 0.1
+        abs_err_1 = torch.mean((abs_err > 1.0).float())   # Percentage of abs_err > 1.0
+
+        # Linear Error (LE90%)
+        le90 = torch.quantile(abs_err, 0.9)  # 90th percentile of absolute error
+
+        # Gradient Error
+        grad_pred_x = torch.abs(ele_pred[:, 1:] - ele_pred[:, :-1])  # Gradient in x-direction
+        grad_pred_y = torch.abs(ele_pred[1:, :] - ele_pred[:-1, :])  # Gradient in y-direction
+        grad_gt_x = torch.abs(ele_gt[:, 1:] - ele_gt[:, :-1])        # Gradient in x-direction
+        grad_gt_y = torch.abs(ele_gt[1:, :] - ele_gt[:-1, :])        # Gradient in y-direction
+        grad_err_x = torch.abs(grad_pred_x - grad_gt_x).mean()       # Gradient error in x-direction
+        grad_err_y = torch.abs(grad_pred_y - grad_gt_y).mean()       # Gradient error in y-direction
+        grad_err = (grad_err_x + grad_err_y) / 2 
+
+        return np.array(torch.tensor([torch.mean(abs_err), rmse, ratio_thresh, abs_err_01, abs_err_1, le90, grad_err], device='cpu'))
+    
+
+    @make_nograd_func
+    def compute_values_rhf(self, ele_gt, ele_pred, ele_mask):
+        ele_gt_masked = ele_gt[ele_mask]
+        ele_pred_masked = ele_pred[ele_mask]
+        abs_err = torch.abs(ele_gt_masked - ele_pred_masked)
+        rmse = (ele_gt_masked - ele_pred_masked) ** 2
+        rmse = torch.sqrt(rmse.mean())
+
+        err_mask = abs_err > 0.5
+        ratio_thresh = torch.mean(err_mask.float())
+
+        # Log RMSE
+        epsilon = 1e-6  # Small value to avoid log(0)
+
+        # Absolute error thresholds
+        abs_err_01 = torch.mean((abs_err > 0.1).float())  # Percentage of abs_err > 0.1
+        abs_err_1 = torch.mean((abs_err > 1.0).float())   # Percentage of abs_err > 1.0
+
+        # Linear Error (LE90%)
+        le90 = torch.quantile(abs_err, 0.9)  # 90th percentile of absolute error
+
+        # Gradient Error
+        grad_pred_x = torch.abs(ele_pred[:, 1:] - ele_pred[:, :-1])  # Gradient in x-direction
+        grad_pred_y = torch.abs(ele_pred[1:, :] - ele_pred[:-1, :])  # Gradient in y-direction
+        grad_gt_x = torch.abs(ele_gt[:, 1:] - ele_gt[:, :-1])        # Gradient in x-direction
+        grad_gt_y = torch.abs(ele_gt[1:, :] - ele_gt[:-1, :])        # Gradient in y-direction
+        grad_err_x = torch.abs(grad_pred_x - grad_gt_x).mean()       # Gradient error in x-direction
+        grad_err_y = torch.abs(grad_pred_y - grad_gt_y).mean()       # Gradient error in y-direction
+        grad_err = (grad_err_x + grad_err_y) / 2 
+        print("gradient_error", grad_err)
+        return np.array(torch.tensor([torch.mean(abs_err), rmse, ratio_thresh, abs_err_01, abs_err_1, le90, grad_err], device='cpu'))
+
 
     @make_nograd_func
     def compute(self, ele_pred, ele_gt, mask):
@@ -64,7 +118,7 @@ class Metric():
         mask_roi = torch.logical_and(ele_gt > -self.ele_range, ele_gt < self.ele_range)
         print("check the mask_roi",mask_roi.sum())
         ele_mask = torch.logical_and(mask_roi, mask)
-        print("check the mask_roi",ele_mask.sum())
+        print("check the mask_roi",ele_mask.shape)
         print("ele_gt", ele_gt.shape,ele_pred.shape)
         print(ele_pred.min(), ele_pred.max())
 
@@ -74,7 +128,8 @@ class Metric():
             return
 
         self.count_all += 1
-        self.metric_all += self.compute_values(ele_gt[ele_mask], ele_pred[ele_mask])
+        #self.metric_all += self.compute_values(ele_gt[ele_mask], ele_pred[ele_mask])
+        self.metric_all += self.compute_values_rhf(ele_gt.squeeze(), ele_pred.squeeze(), ele_mask.squeeze())
 
         if self.distance_wise:
             for i in range(self.num_intervals):

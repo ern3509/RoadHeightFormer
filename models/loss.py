@@ -55,7 +55,7 @@ class LossReg(nn.Module):
         # ele_pred: [B, H, W]
         # ele_gt:   [B, H, W]
         # ele_mask: [B, H, W]
-        print("Erwannnn",ele_pred.shape, ele_gt.shape, ele_mask.shape)
+        #print("Erwannnn",ele_pred.shape, ele_gt.shape, ele_mask.shape)
         print("ele_pred is nan", torch.sum(torch.isnan(ele_pred)))
         ele_mask_roi = torch.logical_and(ele_gt > -1000, ele_gt < 1000)
         ele_mask = torch.logical_and(ele_mask_roi, ele_mask)

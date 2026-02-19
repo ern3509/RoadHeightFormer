@@ -143,7 +143,7 @@ class EleReg2D(nn.Module):
         print("check nan after first conv", torch.sum(torch.isnan(feat_bev)))
         #save_feature_map(feat_bev[0, 0], "feat_bev_ele_reg2d")
         ele = self.reg_head(feat_bev)
-        save_feature_map(ele[0, 0], "ele_map_before_norm_ele_reg2d")
+        #save_feature_map(ele[0, 0], "ele_map_before_norm_ele_reg2d")
         if hasattr(self, 'normoutput'):
             print("helllaaa")
             ele = self.normoutput(ele)  # [-1, 1]

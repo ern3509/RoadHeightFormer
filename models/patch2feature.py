@@ -10,13 +10,12 @@ class patch2feature(nn.Module):
     def __init__(
         self,
         embed_dim: int,
-        output_dim: int = 128, 
+        output_dim: int = 256, 
         patch_size: int = 16,
         out_channels:  Sequence[int] = (256, 512, 1024, 1024),
         intermediate_layer_idx=(0, 1, 2, 3),
     ):
         super().__init__()
-
         self.patch_size = patch_size
         self.intermediate_layer_idx = intermediate_layer_idx
 
@@ -33,22 +32,22 @@ class patch2feature(nn.Module):
         self.resize_layers = nn.ModuleList(
             [
                 nn.ConvTranspose2d(
-                    out_channels[0], out_channels[0], kernel_size=4, stride=4, padding=0
+                    out_channels[0], out_channels[0], kernel_size=4, stride=4, padding=0    #ph*pw -> 4*ph*4*pw
                 ),
                 nn.ConvTranspose2d(
-                    out_channels[1], out_channels[1], kernel_size=2, stride=2, padding=0
+                    out_channels[1], out_channels[1], kernel_size=2, stride=2, padding=0   #ph*pw -> 2*ph*2*pw
                 ),
                 nn.Identity(),
-                nn.Conv2d(out_channels[3], out_channels[3], kernel_size=3, stride=2, padding=1),
+                nn.Conv2d(out_channels[3], out_channels[3], kernel_size=3, stride=2, padding=1), #ph*pw -> (1/2)*ph*(1/2)*pw
             ]
         )
 
         self.norm = nn.LayerNorm(embed_dim)
 
          # -------------------- scratch: stage adapters + main fusion chain --------------------
-        self.scratch = _make_scratch(list(out_channels), 256, expand=False)
+        self.scratch = _make_scratch(list(out_channels), output_dim, expand=False)
         self.scratch.output_conv1 = nn.Conv2d(
-            256, 256 // 2, kernel_size=3, stride=1, padding=1
+            output_dim, output_dim, kernel_size=3, stride=1, padding=1
         )
         #out_conv2 in dpt module
         self.out_norm = nn.Sequential(  
@@ -56,11 +55,11 @@ class patch2feature(nn.Module):
         )
 
         # Main fusion chain
-        self.scratch.refinenet1 = _make_fusion_block(256, inplace=False)
-        self.scratch.refinenet2 = _make_fusion_block(256, inplace=False)
-        self.scratch.refinenet3 = _make_fusion_block(256, inplace=False)
+        self.scratch.refinenet1 = _make_fusion_block(output_dim, inplace=False)
+        self.scratch.refinenet2 = _make_fusion_block(output_dim, inplace=False)
+        self.scratch.refinenet3 = _make_fusion_block(output_dim, inplace=False)
         self.scratch.refinenet4 = _make_fusion_block(
-            256, has_residual=False, inplace=False
+            output_dim, has_residual=False, inplace=False
         )
 
     def _fuse(self, feats: List[torch.Tensor]) -> torch.Tensor:
@@ -70,27 +69,27 @@ class patch2feature(nn.Module):
         l1, l2, l3, l4 = feats
 
         l1_rn = self.scratch.layer1_rn(l1)
-        visualize_value(l1_rn, "l1_rn_feat.png")
-        print("valid elements L1 after the conv", torch.sum(torch.isnan(l1_rn)), torch.sum(torch.isinf(l1_rn)))
+        #visualize_value(l1_rn, "l1_rn_feat.png")
+       #print("valid elements L1 after the conv", torch.sum(torch.isnan(l1_rn)), torch.sum(torch.isinf(l1_rn)))
         l2_rn = self.scratch.layer2_rn(l2)
-        print("valid elements L2 after the conv", torch.sum(torch.isnan(l2_rn)), torch.sum(torch.isinf(l2_rn)))
-        visualize_value(l2_rn, "l2_rn_feat.png")
+       #print("valid elements L2 after the conv", torch.sum(torch.isnan(l2_rn)), torch.sum(torch.isinf(l2_rn)))
+        #visualize_value(l2_rn, "l2_rn_feat.png")
         l3_rn = self.scratch.layer3_rn(l3)
-        print("valid elements L3 after the conv", torch.sum(torch.isnan(l3_rn)), torch.sum(torch.isinf(l3_rn)))
+       #print("valid elements L3 after the conv", torch.sum(torch.isnan(l3_rn)), torch.sum(torch.isinf(l3_rn)))
         l4_rn = self.scratch.layer4_rn(l4)
-        visualize_value(l4_rn, "l4_rn_feat.png")
+        #visualize_value(l4_rn, "l4_rn_feat.png")
 
         # 4 -> 3 -> 2 -> 1
         out = self.scratch.refinenet4(l4_rn, size=l3_rn.shape[2:])
-        print("valid elements after the conv", torch.sum(torch.isnan(out)), torch.sum(torch.isinf(out)))
-        visualize_value(out, "l4_out.png")
+       #print("valid elements after the conv", torch.sum(torch.isnan(out)), torch.sum(torch.isinf(out)))
+        #visualize_value(out, "l4_out.png")
         out = self.scratch.refinenet3(out, l3_rn, size=l2_rn.shape[2:])
-        visualize_value(out, "l3_out.png")
+        #visualize_value(out, "l3_out.png")
 
         out = self.scratch.refinenet2(out, l2_rn, size=l1_rn.shape[2:])
-        visualize_value(out, "l2_out.png")
+        #visualize_value(out, "l2_out.png")
 
-        print("valid elements after the conv", torch.sum(torch.isnan(out)), torch.sum(torch.isinf(out)))
+       #print("valid elements after the conv", torch.sum(torch.isnan(out)), torch.sum(torch.isinf(out)))
         out = self.scratch.refinenet1(out, l1_rn)
         return out
     
@@ -106,33 +105,33 @@ class patch2feature(nn.Module):
         for stage_idx, take_idx in enumerate(self.intermediate_layer_idx):
             x = feats[take_idx][:, patch_start_idx:]  # [B*S, N_patch, C]
             x = self.norm(x)
-            x = x.permute(0, 2, 1).reshape(B, C, ph, pw)  # [B*S, C, ph, pw]
-            print("valid input data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
-            x = self.projects[stage_idx](x)
-            print("valid input projected data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
+            x = x.permute(0, 2, 1).reshape(B, C, ph, pw)  # [B*S, C, ph, pw] C=768
+           #print("valid input data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
+            x = self.projects[stage_idx](x)  # [B*S, C, ph, pw] C here is 48, 96, 192, 384
+           #print("valid input projected data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
 
             x = self.resize_layers[stage_idx](x)  # Align scale
-            print("valid resized input data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
-            visualize_value(x, f"projected_and_resized{stage_idx}.png")
+           #print("valid resized input data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
+            #visualize_value(x, f"projected_and_resized{stage_idx}.png")
             resized_feats.append(x)
 
         # 2) Fusion pyramid (main branch only)
         fused = self._fuse(resized_feats)
-        print("valid fused data before interpolation", torch.sum(torch.isnan(fused)), torch.sum(torch.isinf(fused)))
-        visualize_value(fused, "fuse_before_outconv.png")
+       #print("valid fused data before interpolation", torch.sum(torch.isnan(fused)), torch.sum(torch.isinf(fused)))
+        #visualize_value(fused, "fuse_before_outconv.png")
         
         fused = self.scratch.output_conv1(fused)
-        print("valid fused data", torch.sum(torch.isnan(fused)), torch.sum(torch.isinf(fused)))
+       #print("valid fused data", torch.sum(torch.isnan(fused)), torch.sum(torch.isinf(fused)))
         # Get index of largest value
-        visualize_value(fused, "fused_beforeinterpolation.png")
+        #visualize_value(fused, "fused_beforeinterpolation.png")
 
         fused = custom_interpolate(fused, (h_out, w_out), mode="bilinear", align_corners=True)
-        print("valid interpolate fused data", torch.sum(torch.isnan(fused)), torch.sum(torch.isinf(fused)))
-        visualize_value(fused, "fused_afterinterpolation.png")
+       #print("valid interpolate fused data", torch.sum(torch.isnan(fused)), torch.sum(torch.isinf(fused)))
+        #visualize_value(fused, "fused_afterinterpolation.png")
 
-        print("fused shape after interpolation:", fused.shape)
+       #print("fused shape after interpolation:", fused.shape)
 
-        fused = self.out_norm(fused)
+        #fused = self.out_norm(fused)
         return fused
 
 def _make_scratch(
@@ -180,7 +179,7 @@ class ResidualConvUnit(nn.Module):
         self.conv1 = nn.Conv2d(features, features, 3, 1, 1, bias=True, groups=groups)
         self.conv2 = nn.Conv2d(features, features, 3, 1, 1, bias=True, groups=groups)
         if bn:
-            print("defining normalisation")
+           #print("defining normalisation")
             self.norm1 = nn.BatchNorm2d(features)
             self.norm2 = nn.BatchNorm2d(features)
         else:
@@ -193,7 +192,7 @@ class ResidualConvUnit(nn.Module):
         out = self.activation(x)
         out = self.conv1(out)
         if self.norm1 is not None:
-            print("normalising")
+           #print("normalising")
             out = self.norm1(out)
 
         out = self.activation(out)
@@ -325,14 +324,14 @@ class easy_transition_layer(nn.Module):
         resized_feats = []
         x = feats[-1]  # [B*S, N_patch, C]
         x = self.norm(x)
-        print("valid input data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
+       #print("valid input data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
         x = x.permute(0, 2, 1).reshape(B, C, ph, pw)  # [B*S, C, ph, pw]
 
         x = self.projects[-1](x)
-        print("valid projected input data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
+       #print("valid projected input data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
 
         x = custom_interpolate(x, size=(H_out, W_out), mode="bilinear", align_corners=True)
-        print("valid interpolated input data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
+       #print("valid interpolated input data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
 
         return x
     
@@ -344,7 +343,7 @@ def visualize_value(fused, name_of_file):
     # Convert to coordinates
     coords = torch.unravel_index(idx, x.shape)
 
-    print("Max value location:", name_of_file, coords)
+   #print("Max value location:", name_of_file, coords)
     if x.shape[1] < 82:
         save_feature_map(fused[0, x.shape[1] - 1], name_of_file)
     else:

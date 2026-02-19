@@ -65,10 +65,11 @@ class EarlyStopping:
                 self.should_stop = True
 
 def unnormalize(ele_pred, h_min, h_max):
-    height = ele_pred[:, 0:1]  # keep channel dim
-    height = height * ((h_max - h_min) / 2) + ((h_max + h_min) / 2)
-    ele_pred = torch.cat([height, ele_pred[:, 1:2]], dim=1)
+    #height = ele_pred[:, 0:1]  # keep channel dim
+    #height = height * ((h_max - h_min) / 2) + ((h_max + h_min) / 2)
+    #ele_pred = torch.cat([height, ele_pred[:, 1:2]], dim=1)
 
+    ele_pred = ele_pred * ((h_max - h_min) / 2) + ((h_max + h_min) / 2)
     return ele_pred
 
 def train_regression():
@@ -87,16 +88,16 @@ def train_regression():
             "scheduler" : args.scheduler,
             "backbone" : args.backbone,
             "loss_function" : args.loss,
-            "Batch_size" : 16,
+            "Batch_size" : args.batch_size,
     })
-    global_step = -1
+    global_step = 0
     logged_train_static = False
     gt_vmax = [0, 0, 0]
     gt_vmin = [14, 14, 14]
     logged_eval_static = False
 
     for epoch_idx in tqdm(range(args.epochs)):
-        
+        time_epoch = time.time()
         with tqdm(total=len(train_loader), desc=f"Epoch {epoch_idx+1}", unit="batch") as pbar:
             for i, sample in enumerate(train_loader):
                 global_step += 1
@@ -117,7 +118,6 @@ def train_regression():
                         #print("train ele pred shape:", ele_pred.shape)
                         ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
                     
-                    
                     loss_all = loss_func(ele_pred, ele_gt, ele_mask)
                     if args.normalize:
                         h_min = - ele_range * 100
@@ -125,42 +125,31 @@ def train_regression():
                         ele_pred_fixed = unnormalize(ele_pred_fixed, h_min, h_max)
                         print("max and min after normalization:", ele_pred_fixed.max().item(), ele_pred_fixed.min().item())
 
-                
+            
             #/****logging ***********************
-                if global_step % 5 == 0:
+                print("logging step:", global_step, args.summary_freq)
+                if global_step % args.summary_freq == 0: 
                     log_dict = {}
-                    
                     for s in range(len(fixed_train_indices)):
-                        
-                        # Log static data ONCE
                         if not logged_train_static:
-                            log_dict[f"train/static/sample_{s}/image"] = \
-                            wandb_rgb_image(train_imgs_fixed[s], caption=f"Train image sample {s}")
                             gt_np = np.ma.masked_where(
-                                train_mask_fixed[s].cpu().numpy() == 0,
-                                train_gt_fixed[s].cpu().numpy(),
+                            train_mask_fixed[s].cpu().numpy() == 0,
+                            train_gt_fixed[s].cpu().numpy(),
                             )
-
                             gt_vmin[s] = gt_np.min()
                             gt_vmax[s] = gt_np.max()
 
-                            log_dict[f"train/static/sample_{s}/gt"] = \
-                                wandb_heightmap_image(train_gt_fixed[s], train_mask_fixed[s], caption="GT (cm)", vmin = gt_vmin[s], vmax = gt_vmax[s])
-
-                            
-
-                # # Log predictions WITH SLIDER
-                # for s in range(3):
-                        print("ele pred fixed shape:", ele_pred_fixed.shape)
                         height_prediction = ele_pred_fixed[s]#, 0]	
-                        img = wandb_heightmap_image(
-                                height_prediction.squeeze(),
-                                train_mask_fixed[s],  
-                                caption=f"step {global_step}", vmin = gt_vmin[s], vmax = gt_vmax[s]
-                            )
-                        error_img = wandb_error_map(height_prediction.squeeze(), train_gt_fixed[s], train_mask_fixed[s], caption=f"Error map at step {global_step} of sample {s}")
-                        wandb.log({"train/error_map_sample_" + str(s): error_img}, step=global_step)
-                        wandb.log({"train/pred_sample_" + str(s): img}, step=global_step)
+                        combined_img = wandb_combined_image(
+                        height_prediction.squeeze(),
+                        train_gt_fixed[s],
+                        train_mask_fixed[s],
+                        train_imgs_fixed[s],
+                        caption=f"Combined Visualization of sample {s} at step {global_step}",
+                        vmin=gt_vmin[s],
+                        vmax=gt_vmax[s],
+                        )
+                        wandb.log({"train/combined_sample_" + str(s): combined_img}, step=global_step)
 
                     logged_train_static = True
                     wandb.log(log_dict, step=global_step)
@@ -191,7 +180,7 @@ def train_regression():
                 print(info)
 
 
-                if global_step % (args.summary_freq/10) == 0:
+                if global_step % (10*args.summary_freq) == 0:
                     """    loss_data = loss_all.data.item()
                     if np.isnan(loss_data):
                         print('nan loss!')
@@ -200,22 +189,25 @@ def train_regression():
                     log_file.write(info + '\n')
                     log_file.flush()
                     [metric_all, _], eval_loss = test_sample_regression(test_loader, global_step, run, logged_eval_static)
-                    wandb.log({"eval_loss": eval_loss}, step = global_step)
-                    wandb.log({"metric_abs": metric_all[0]}, step = global_step)
-                    wandb.log({"metric_rmse": metric_all[1]}, step = global_step)
-                    wandb.log({"metric_gt05cm": metric_all[2]}, step = global_step)
+                    wandb.log({"metrics/eval_loss": eval_loss}, step = global_step)
+                    wandb.log({"metrics/metric_abs": metric_all[0]}, step = global_step)
+                    wandb.log({"metrics/metric_rmse": metric_all[1]}, step = global_step)
+                    wandb.log({"metrics/metric_gt05cm": metric_all[2]}, step = global_step)
+                    #wandb.log({"log_rmse": metric_all[3]}, step = global_step)
+                    wandb.log({"metrics/abs_err_0.1": metric_all[3]}, step = global_step)
+                    wandb.log({"metrics/abs_err_1": metric_all[4]}, step = global_step)
+                    wandb.log({"metrics/le90": metric_all[5]}, step = global_step)
+                    wandb.log({"metrics/grad_err": metric_all[6]}, step = global_step)
 
-                if global_step % (5*args.summary_freq) == 0:
-                    torch.save(model.state_dict(), "{}/checkpoint_epoch{:0>2}_{:0>6}.ckpt".format(args.logdir, epoch_idx+1, global_step))
+                if global_step % (20*args.summary_freq) == 0:
+                    #torch.save(model.state_dict(), "{}/checkpoint_epoch{:0>2}_{:0>6}.ckpt".format(args.logdir, epoch_idx+1, global_step))
 
-                    torch.cuda.empty_cache()
-                   
-                    
+                    torch.cuda.empty_cache() 
 
                     early_stopping(eval_loss)
                     
 
-                    info = 'test:    abs_err:%.3f, rmse:%.3f, >0.5cm:%.2f, eval_loss:%.3f' % (metric_all[0], metric_all[1], metric_all[2]*100, eval_loss)
+                    info = 'test:  abs_err:%.3f, rmse:%.3f, >0.5cm:%.2f, grad_error:%.3f eval_loss:%.3f' % (metric_all[0], metric_all[1],metric_all[2]*100, metric_all[-1], eval_loss)
                     log_file.write(info + '\n')
                     log_file.flush()
                     print(info)
@@ -223,6 +215,9 @@ def train_regression():
             # if early_stopping.should_stop:
             #     print("Early stopping triggered!")
             #     break
+        time_epoch_end = time.time() - time_epoch
+        wandb.log({"epoch/epoch_duration": time_epoch_end}, step=global_step)
+        wandb.log({"epoch/epoch": epoch_idx+1}, step=global_step)
     run.finish()
 @make_nograd_func
 def test_sample_regression(test_loader, global_step, run, logged_eval_static):
@@ -230,6 +225,37 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
     eval_loss = 0.0
     gt_vmin = [0, 0, 0]
     gt_vmax = [14, 14, 14]
+    h_min = - ele_range*100
+    h_max = ele_range*100
+    #save file for visualization pytorch
+    ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
+    
+    for s in range(len(fixed_eval_indices)):
+        if args.normalize:
+            print("undo normalization in visualization of some testing sample")
+            ele_pred_fixed = ele_pred_fixed * ((h_max - h_min) / 2) + ((h_max + h_min) / 2)
+        
+        if not logged_eval_static:
+            gt_np = np.ma.masked_where(
+                        eval_mask_fixed[s].cpu().numpy() == 0,
+                        eval_gt_fixed[s].cpu().numpy(),
+                    )
+            gt_vmin[s] = gt_np.min()
+            gt_vmax[s] = gt_np.max()
+
+        height_prediction = ele_pred_fixed[s]
+        combined_img = wandb_combined_image(
+                        height_prediction.squeeze(),
+                        eval_gt_fixed[s],
+                        eval_mask_fixed[s],
+                        eval_imgs_fixed[s],
+                        caption=f"Combined Evaluation Visualization at step {global_step}",
+                        vmin=gt_vmin[s],
+                        vmax=gt_vmax[s],
+                        test=True
+                        )
+        wandb.log({"test/combined_sample_" + str(s): combined_img}, step=global_step)
+    logged_eval_static = True
     for i, sample in enumerate(test_loader):
         if args.stereo:
             (imgs_left, imgs_right, ele_gt, ele_mask, proj_index_left, proj_index_right, _) = sample
@@ -259,6 +285,7 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
             
             loss_all = sum_absolute_error(ele_pred[ele_mask > 0], ele_gt[ele_mask > 0]) / ele_mask.sum().item()
             log_dict = {}
+            """"
             if i == 0:
                 # Log static data ONCE
                 if not logged_eval_static:
@@ -295,7 +322,7 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
                     wandb.log({"eval/error_map_sample_" + str(s): error_img}, step=global_step)
 
                 wandb.log(log_dict, step=global_step)
-
+"""""
                 #CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(img_prob.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_pred' + global_step.__str__() + '.png')
                 #CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_gt' + global_step.__str__() + '.png')
             
@@ -315,14 +342,17 @@ def train():
         name = args.name_run +  str(now.month) + '/' + str(now.day),
         notes = args.notes,
         config ={
-            "learning_rate" : 8e-4,
+            "learning_rate" : args.lr,
             "epochs": args.epochs,
             "dataset": args.dataset,
             "trainloader length": len(train_loader),
             "testloader length": len(test_loader),
-            "scheduler" : "ReduceLROnPlateau" if args.regression else "OneCycleLR",
+            "scheduler" : args.scheduler,
+            "backbone" : args.backbone,
+            "loss_function" : args.loss,
+            "Batch_size" : args.batch_size,
     })
-    global_step = -1
+    global_step = 0
     logged_train_static = False
     gt_vmax = [0, 0, 0]
     gt_vmin = [14, 14, 14]
@@ -389,7 +419,7 @@ def train():
                         error_img = wandb_error_map(height_prediction.squeeze(), train_gt_fixed[s], train_mask_fixed[s], caption=f"Error map at step {global_step} of sample {s}")
                         wandb.log({"train/error_map_sample_" + str(s): error_img}, step=global_step)
                         wandb.log({"train/pred_sample_" + str(s): img}, step=global_step)
-
+                    
                     logged_train_static = True
                     wandb.log(log_dict, step=global_step)
                 scaler.scale(loss_all).backward()
@@ -468,6 +498,7 @@ def test_sample(test_loader, global_step, run, logged_eval_static=False):
             #ele_pred = torch.tensor(ele_pred.unsqueeze(dim=0))
             loss_all = sum_absolute_error(ele_pred[ele_mask > 0], ele_gt[ele_mask > 0]) / ele_mask.sum().item()
             log_dict = {}
+            
             if i == 0:
                 # Log static data ONCE
                 if not logged_eval_static:
@@ -486,7 +517,7 @@ def test_sample(test_loader, global_step, run, logged_eval_static=False):
                             wandb_heightmap_image(eval_gt_fixed[s], eval_mask_fixed[s], caption="GT (cm)")
 
                     logged_eval_static = True
-
+            
                 # Log predictions WITH SLIDER
                 pred_images = []
                 for s in range(len(fixed_eval_indices)):
@@ -504,7 +535,7 @@ def test_sample(test_loader, global_step, run, logged_eval_static=False):
                     wandb.log({"eval/pred_sample_" + str(s): img}, step=global_step)
                     wandb.log({"eval/error_map_sample_" + str(s): error_img}, step=global_step)
 
-                wandb.log(log_dict, step=global_step)
+                wandb.log(log_dict, step=global_step) 
 
                 #CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(img_prob.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_pred' + global_step.__str__() + '.png')
                 #CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_gt' + global_step.__str__() + '.png')
@@ -559,6 +590,75 @@ def wandb_error_map(
 
     return wandb.Image(fig, caption=caption)
 
+def wandb_combined_image(
+    pred: torch.Tensor,
+    gt: torch.Tensor,
+    mask: torch.Tensor,
+    img: torch.Tensor,
+    caption: str = "",
+    cmap: str = "plasma",
+    vmin: float = None,
+    vmax: float = None,
+    test = False
+) -> wandb.Image:
+    """
+    Combine prediction, ground truth, and error map into a single image.
+
+    Args:
+        pred: torch.Tensor (H, W) prediction.
+        gt: torch.Tensor (H, W) ground truth.
+        mask: torch.Tensor (H, W), 0 = invalid.
+        caption: Image caption.
+        cmap: Colormap for the heightmaps.
+        vmin/vmax: Optional fixed range for color normalization.
+
+    Returns:
+        wandb.Image: Combined image for logging.
+    """
+    # --- Convert tensors to numpy ---
+    pred = pred.detach().cpu().numpy()
+    gt = gt.detach().cpu().numpy()
+    mask = mask.detach().cpu().numpy()
+    img = img.detach().cpu()
+    img = denormalize(img, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    img = img.permute(1, 2, 0).numpy()
+
+    # --- Mask invalid regions ---
+    if test == False:
+        pred = np.ma.masked_where(mask == 0, pred)    
+    gt = np.ma.masked_where(mask == 0, gt)
+    error = np.ma.masked_where(mask == 0, pred - gt)
+
+    # --- Create the figure ---
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+
+    # Prediction
+    im_pred = axes[0].imshow(pred, cmap=cmap, vmin=vmin, vmax=vmax)
+    axes[0].set_title("Prediction")
+    axes[0].axis("off")
+    fig.colorbar(im_pred, ax=axes[0], fraction=0.046, pad=0.04)
+
+    # Ground Truth
+    im_gt = axes[1].imshow(gt, cmap=cmap, vmin=vmin, vmax=vmax)
+    axes[1].set_title("Ground Truth")
+    axes[1].axis("off")
+    fig.colorbar(im_gt, ax=axes[1], fraction=0.046, pad=0.04)
+
+    # Error Map
+    im_error = axes[2].imshow(error, cmap="RdBu_r")
+    axes[2].set_title("Error Map")
+    axes[2].axis("off")
+    fig.colorbar(im_error, ax=axes[2], fraction=0.046, pad=0.04, label="Error (cm)")
+
+    image = axes[3].imshow(img)
+    axes[3].set_title("GT image")
+    axes[3].axis("off")
+
+
+    fig.tight_layout()
+
+    # --- Return as wandb.Image ---
+    return wandb.Image(fig, caption=caption)
 
 def wandb_heightmap_image(height_map, mask, caption, cmap="plasma", vmin = None, vmax = None):
     """
@@ -593,6 +693,22 @@ def get_fixed_samples(dataset, indices, device):
 
     return imgs, ele_gt, ele_mask, proj_idx
 
+def denormalize(img, mean, std):
+    """
+    Denormalize a normalized image.
+
+    Args:
+        img: torch.Tensor (C, H, W) normalized image.
+        mean: List of mean values for each channel.
+        std: List of standard deviation values for each channel.
+
+    Returns:
+        torch.Tensor: Denormalized image.
+    """
+    mean = torch.tensor(mean).view(3, 1, 1)  # Reshape to (C, 1, 1)
+    std = torch.tensor(std).view(3, 1, 1)    # Reshape to (C, 1, 1)
+    return img * std + mean
+
 def sum_absolute_error(pred, gt):
     """
     Compute the Sum of Absolute Error (SAE) between two elevation maps.
@@ -624,7 +740,7 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=50, help='number of epochs to train')
     parser.add_argument('--logdir', default='./checkpoints/', help='the directory to save logs and checkpoints')
     parser.add_argument('--loadckpt', default=None, help='load the weights from a specific checkpoint')
-    parser.add_argument('--summary_freq', type=int, default=1500, help='summary_freq')
+    parser.add_argument('--summary_freq', type=int, default=40, help='summary_freq')
     parser.add_argument('--seed', type=int, default=307, metavar='S', help='random seed')
     parser.add_argument('--regression', action='store_true', help='regression or classification')
     parser.add_argument('--backbone',default='efficientnet', help='Use DepthAnything3 backbone or EfficientNet')
@@ -634,6 +750,10 @@ if __name__ == '__main__':
     parser.add_argument('--loss', type=str, default='L1', help='type of loss to use if regression: L1, gaussian NLL')
     parser.add_argument('--normalize', action='store_true', help='disable normalization')
     parser.add_argument('--name_run', type=str, default= ' ', help='give the name of the wandb run')
+    parser.add_argument('--pred_head_dim', type=int, default=128, help='define the bottleneck between the transformer encoder and the CNN prediction head')
+
+
+
     # parse arguments, set seeds
     args = parser.parse_args()
     torch.backends.cudnn.enable = True
@@ -665,8 +785,8 @@ if __name__ == '__main__':
         #args.epochs = 20
 
     elif 'CARDSet' in args.dataset:
-        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/RoadHeightFormer_training.txt', mode='train', down_scale=args.down_scale)
-        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/RoadHeightFormer_test.txt', mode='test', down_scale=args.down_scale)
+        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/train_all_data_clean_NN_RHF.txt', mode='train', down_scale=args.down_scale)
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='test', down_scale=args.down_scale)
     
     
     
@@ -681,8 +801,8 @@ if __name__ == '__main__':
     print('dataset size - train:%d, test:%d' % (len(train_set), len(test_set)))
 
     #get fixed sample for logging
-    fixed_train_indices = [0]#, 2, 3]  
-    fixed_eval_indices  = [0]#,6,7]
+    fixed_train_indices = [0, 1, 2]#, 2, 3]  
+    fixed_eval_indices  = [0, 1, 2]#,6,7]
 
     device = "cuda"
 
@@ -695,11 +815,12 @@ if __name__ == '__main__':
     ele_range = train_set.y_range
     voxel_ele_res = train_set.grid_res[1]
     num_grids = [train_set.num_grids_x, train_set.num_grids_y, train_set.num_grids_z]
-    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize).cuda()
+    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize, args.pred_head_dim).cuda()
     early_stopping = EarlyStopping(patience=300, min_delta=0.001)
     print('num params:', sum(p.numel() for p in model.parameters() if p.requires_grad))
+    #print(model)
     model.train()
-
+    
     if args.regression:
         if args.loss == 'L1':
             loss_func = LossReg(ele_range, args.normalize).cuda()
@@ -730,7 +851,14 @@ if __name__ == '__main__':
         model.load_state_dict(state_dict, strict=True)
 
     scaler = GradScaler()
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=1e-4)
+
+    lr_encoder = 1e-5
+    encoder_params = list(model.feature_extraction.parameters())
+    decoder_params = [param for name, param in model.named_parameters() if 'feature_extraction' not in name]
+    print(f"number of decoder parameters: {sum(p.numel() for p in decoder_params)} vs number of parameter{sum(p.numel() for p in model.parameters())} vs number of encoder param {sum(p.numel() for p in encoder_params)}")
+
+    optimizer = optim.AdamW([{"params":decoder_params, "lr":args.lr, "betas":(0.9, 0.999), "weight_decay":1e-4},
+                             {"params":encoder_params, "lr":lr_encoder, "betas":(0.9, 0.999), "weight_decay":1e-4}])
 
     if args.scheduler == 'reduceonplaeau':
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(

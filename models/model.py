@@ -23,13 +23,13 @@ def print_types(obj, indent=0):
     if isinstance(obj, (list, tuple)):
         print(f"{prefix}{type(obj).__name__} (len={len(obj)})")
         for i, item in enumerate(obj):
-            print(f"{prefix}  [{i}]:")
-            print_types(item, indent + 2)
+           print(f"{prefix}  [{i}]:")
+           print_types(item, indent + 2)
     else:
-        print(f"{prefix}{type(obj).__name__}")
+       print(f"{prefix}{type(obj).__name__}")
 
 class Elevation(nn.Module):
-    def __init__(self, stereo,  num_grids, ele_range, cla_res, regression=False, backbone = 'efficientnet', normalize=False):
+    def __init__(self, stereo,  num_grids, ele_range, cla_res, regression=False, backbone = 'efficientnet', normalize=False, pred_dim =256):
         super(Elevation, self).__init__()
         self.stereo = stereo
         self.num_grids_x, self.num_grids_y, self.num_grids_z = num_grids
@@ -38,8 +38,8 @@ class Elevation(nn.Module):
         self.backbone = backbone
 
         self.cla_res = cla_res
-        self.num_classes = int(2 * self.ele_range*100 / self.cla_res)
-        ele_values = -torch.arange(self.num_classes, dtype=torch.float32, device='cuda')*self.cla_res + self.ele_range*100 - self.cla_res/2
+        self.num_classes = int(2 * self.ele_range*100 / self.cla_res)    #the smaller the clas_res, the more classes we have
+        ele_values = -torch.arange(self.num_classes, dtype=torch.float32, device='cuda')*self.cla_res + self.ele_range*100 - self.cla_res/2 #19.75, 19.25, 18.75, ..., -18.75, -19.25, 19.75
         self.ele_values = ele_values.reshape(1, self.num_classes, 1, 1)
         
         self.patch2feat = True
@@ -49,23 +49,21 @@ class Elevation(nn.Module):
             model = DepthAnything3.from_pretrained("depth-anything/DA3-SMALL")
             #print("model_depthAnything3", model)
             encoder = model.model.backbone
-            # print("encoder", encoder)
+            ##print("encoder", encoder)
             self.feature_extraction = encoder
             if self.patch2feat:
-                self.transition_layer = patch2feature(embed_dim=768, patch_size=14, output_dim = 128,
+                self.transition_layer = patch2feature(embed_dim=768, patch_size=14, output_dim = pred_dim,
                                                       out_channels = [48, 96, 192, 384])
             else:
-                self.transition_layer = easy_transition_layer(embed_dim=768, patch_size=14, out_channels=128)
-            self.feat_channel = 128  # DepthAnything3 feature map channel count
-
-            self.projection = nn.Linear(3072, 64)   #get back to the vanilla feature channel
+                self.transition_layer = easy_transition_layer(embed_dim=768, patch_size=14, out_channels = pred_dim)
+            self.feat_channel = pred_dim
         
         else:
             self.feature_extraction = efficientnet_feature(self.stereo) 
             self.feat_channel = self.feature_extraction.feat_channel
         if regression:
             #regressor for regression
-            print("Using regression head")
+           #print("Using regression head")
 
             self.ele_head = EleReg2D(self.feat_channel, num_grids, normalize)
 
@@ -98,7 +96,7 @@ class Elevation(nn.Module):
         # proj_index: [num_samples, 2, num_grids_z*num_grids_x*num_grids_y]
         if self.backbone == 'DepthAnything3':
             #with torch.no_grad():
-            print("start feature extraction with DepthAnything3 backbone")
+           #print("start feature extraction with DepthAnything3 backbone")
             # add a dimension to input image
             imgs_left = imgs_left.unsqueeze(1) # [B, 1, C, H, W] 
             features, aux_features = self.feature_extraction(imgs_left)  #tuple of pair of feautures (patch embed and 1dfeature vector)
@@ -111,10 +109,10 @@ class Elevation(nn.Module):
                 features_left = self.transition_layer(features, 952, 518, 238, 130)   #B*S, C, 952, 518
             else:
                 features_left = self.transition_layer(features, 952, 518, 238, 130)   #B, C, 952, 518
-            print("Extracted features shape:", features_left.shape)
+           #print("Extracted features shape:", features_left.shape)
         
         else:
-            print("start feature extraction with EfficientNet backbone")
+           #print("start feature extraction with EfficientNet backbone")
             features_left = self.feature_extraction(imgs_left)
             #print("Extracted features shape:", features_left.shape)
             
@@ -122,13 +120,13 @@ class Elevation(nn.Module):
         features_left = features_left.reshape(B, C, -1)
         linear_indices = proj_index_left[:, 1, :] * W + proj_index_left[:, 0, :]
 
-        print("linear indices:" ,linear_indices.shape)
+       #print("linear indices:" ,linear_indices.shape)
         voxel_feat_left = features_left.gather(dim=2, index=linear_indices.unsqueeze(1).expand(-1, C, -1))
         #print("voxel feet after gather shape:", voxel_feat_left.shape)
 
         voxel_feat_left = voxel_feat_left.reshape(B, C, self.num_grids_z, self.num_grids_x, self.num_grids_y)
-        print("voxel feat valid", torch.sum(torch.isnan(voxel_feat_left)))
-        print("range of voxel_feat_left:", voxel_feat_left.min().item(), voxel_feat_left.max().item())
+       #print("voxel feat valid", torch.sum(torch.isnan(voxel_feat_left)))
+       #print("range of voxel_feat_left:", voxel_feat_left.min().item(), voxel_feat_left.max().item())
         save_feature_map(voxel_feat_left[0, 0, :, :, self.num_grids_y//2], "voxel_feature_map_left.png")
 
         # proj_index: [num_samples, 2, num_grids_z*num_grids_x*num_grids_y]
@@ -231,7 +229,7 @@ class DinoV2SpatialDecoder(nn.Module):
         """
         assert len(feats) == len(self.intermediate_layer_idx)
 
-        print("shape of one patch feature: ",feats[0].shape)
+       #print("shape of one patch feature: ",feats[0].shape)
 
         B, _, C = feats[0].shape
         ph, pw = H // self.patch_size, W // self.patch_size
@@ -249,7 +247,7 @@ class DinoV2SpatialDecoder(nn.Module):
             # project channels
             x = self.projects[stage_idx](x) # [B, out_channels, ph, pw]
 
-            print(f"after projection shape at stage {stage_idx}:", x.shape) 
+           #print(f"after projection shape at stage {stage_idx}:", x.shape) 
 
             # resize to target resolution
             x = F.interpolate(
@@ -266,8 +264,8 @@ class DinoV2SpatialDecoder(nn.Module):
         fused = fused.sum(dim=0)
         fused = self.fuse(fused) 
         save_feature_map(fused[0, 0, :, :], "fused_feature_map.png")
-        print("fused after conv shape:", fused.shape) #[B, out_channels, H, W]
-        print("Fused feature map border values:", fused[0, :, 0, :], fused[0, :, -1, :])
+       #print("fused after conv shape:", fused.shape) #[B, out_channels, H, W]
+       #print("Fused feature map border values:", fused[0, :, 0, :], fused[0, :, -1, :])
         return fused
 
     def forward(
@@ -286,7 +284,7 @@ class DinoV2SpatialDecoder(nn.Module):
             feat.permute(0, 2, 1).reshape(feat.shape[0], feat.shape[2], ph, pw) 
             for feat in feats
         ]  # [B, C, ph, pw]
-        print("shape of one patch feature: ",feats[-1].shape)
+       #print("shape of one patch feature: ",feats[-1].shape)
         ops = [self.fpn1, self.fpn2, self.fpn3, self.fpn4]
         if len(feats) > 1:
             for i in range(len(ops)):
@@ -294,7 +292,7 @@ class DinoV2SpatialDecoder(nn.Module):
             for i in range(len(features)):
                 features[i] = ops[i](features[i])
                 features[i] = self.projects[i](features[i])
-                print(f"feature shape after fpn {i + 1} :", features[i].shape)
+               #print(f"feature shape after fpn {i + 1} :", features[i].shape)
                 features[i] = F.interpolate(
                     features[i],
                     size=(H_out, W_out),
@@ -303,7 +301,7 @@ class DinoV2SpatialDecoder(nn.Module):
                 )  # [B, out_channels, H, W]
             
             features_fused = torch.stack(features, dim=0).sum(dim=0)
-            print("features fused shape before conv:", features_fused.shape)
+           #print("features fused shape before conv:", features_fused.shape)
 
         return features_fused
             
