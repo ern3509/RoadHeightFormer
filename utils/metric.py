@@ -100,7 +100,7 @@ class Metric():
         # Linear Error (LE90%)
         le90 = torch.quantile(abs_err, 0.9)  # 90th percentile of absolute error
 
-        # Gradient Error
+        # Gradient Error todo: apply mask on it
         grad_pred_x = torch.abs(ele_pred[:, 1:] - ele_pred[:, :-1])  # Gradient in x-direction
         grad_pred_y = torch.abs(ele_pred[1:, :] - ele_pred[:-1, :])  # Gradient in y-direction
         grad_gt_x = torch.abs(ele_gt[:, 1:] - ele_gt[:, :-1])        # Gradient in x-direction

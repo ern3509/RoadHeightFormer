@@ -69,6 +69,8 @@ def test_sample(test_loader):
         torch.cuda.synchronize()
         times[i] = starter.elapsed_time(ender)
 
+        print("predictione rwan", pred.shape)
+        print(ele_gt.shape)
         metric.compute(pred, ele_gt, ele_mask)
         #with open('./bev_pred/' + cur_time[0] + '.pkl', 'wb') as f:
             #pickle.dump(pred.squeeze().data.cpu(), f)
@@ -89,7 +91,10 @@ if __name__ == '__main__':
     parser.add_argument('--backbone',default='efficientnet', help='Use DepthAnything3 backbone or EfficientNet')
     parser.add_argument('--normalize', action='store_true', help='if set, normalize the height values to [-1, 1] for regression')
     parser.add_argument('--dataset', help='dataset to use: add it to wandb runs')
-    parser.add_argument('--pred_head_dim', type=int, default=256, help='define the bottleneck between the transformer encoder and the CNN prediction head')
+    parser.add_argument('--pred_head_dim', type=int, default=128, help='define the bottleneck between the transformer encoder and the CNN prediction head')
+    parser.add_argument('--preprocessed', action='store_true', help='if yes, the dataloader will load preprocessed data')
+    parser.add_argument('--load_pt', default=None, help='load weights, optimizer, start_idx to resume run')
+    parser.add_argument('--dino', default="small", help='ViT encoder size')
 
     # parse arguments, set seeds
     args = parser.parse_args()
@@ -116,6 +121,9 @@ if __name__ == '__main__':
     elif 'CARDSetV2Small' in args.dataset:
         test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
     
+    elif 'CARDSetSmall' in args.dataset:
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_small_dataset.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed)
+
     elif 'RSRD' in args.dataset:
         test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
 
@@ -128,7 +136,10 @@ if __name__ == '__main__':
     #test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
     test_loader = DataLoader(test_set, 1, shuffle=False, num_workers=1, drop_last=False, pin_memory=True)
     print('test set:', len(test_set))
-
+    log_dir = "testing_files"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = open(os.path.join(log_dir, 'log.txt'), 'a')
+    
     # model
     ele_range = test_set.y_range
     voxel_ele_res = test_set.grid_res[1]
@@ -138,14 +149,17 @@ if __name__ == '__main__':
     model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize, args.pred_head_dim).cuda()
     print(model)
     print('num params:', sum(p.numel() for p in model.parameters() if p.requires_grad))
-    metric = Metric(ele_range, test_set.num_grids_z, distance_wise=True)
+    metric = Metric(ele_range, test_set.num_grids_z, distance_wise=False)
+
+    #log_file.write(f"{model}")
 
     print("loading model {}".format(args.loadckpt))
-    state_dict = torch.load(args.loadckpt)
+    checkpoint = torch.load(args.load_pt)
+    state_dict = checkpoint["model"]
     model.load_state_dict(state_dict, strict=True)
 
     [metric_all, metric_depthwise] = test_sample(test_loader)
     info = 'test:    abs_err:%.3f, rmse:%.3f, >0.5cm:%.2f' % (metric_all[0], metric_all[1], metric_all[2]*100)
     print(info)
 
-    metric.plot_depthwise(metric_depthwise)
+    #metric.plot_depthwise(metric_depthwise)

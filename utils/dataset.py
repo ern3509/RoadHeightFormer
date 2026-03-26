@@ -92,7 +92,7 @@ class RSRD(Dataset):
             with open(os.path.join(sample_path, file), 'rb') as f:
                 data = pickle.load(f)
             data_all += data
-        self.data_all = data_all[:8]
+        self.data_all = data_all
         print(f"Total number of samples loaded: {len(self.data_all)}")
 
     def get_lidar2cam(self, date_stamp):

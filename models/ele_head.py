@@ -117,9 +117,9 @@ class EleReg2D(nn.Module):
             convbn(self.channel_reshaped, self.inplanes, 3, 1, 1, 1), #nn.Conv2d(self.channel_reshaped, self.inplanes, 3, 1, 1, bias= True),#
             nn.ReLU(inplace=True)
         )
-        if normalize:
-            print("EleReg2D: using Tanh normalization for output elevation")
-            self.normoutput = nn.Tanh()
+        # if normalize:
+        #     print("EleReg2D: using Tanh normalization for output elevation")
+        #     self.normoutput = nn.Tanh()
        
 
     def forward(self, feat_voxel):
@@ -130,12 +130,6 @@ class EleReg2D(nn.Module):
         feat_bev = feat_bev.reshape(
             B, self.channel_reshaped, self.num_grids_z, self.num_grids_x
         )
-
-        for name, param in self.first_conv.named_parameters():
-            print(f"{name}: max={param.max().item()}, min={param.min().item()}")
-        for name, param in self.first_conv[0].named_parameters():
-            if "running_mean" in name or "running_var" in name:
-                print(f"{name}: {param}")
         print("Range of feat_bev before first_conv:", feat_bev.min().item(), feat_bev.max().item())
         #save_feature_map(feat_bev[0, 0], "input_to_first_conv.png")
         feat_bev = self.first_conv(feat_bev)
