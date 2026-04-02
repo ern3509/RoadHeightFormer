@@ -1,4 +1,4 @@
-import torch
+import torch, sys
 import torch.nn as nn
 from typing import List, Sequence, Tuple, Union
 from .DPT_utils import Permute
@@ -6,6 +6,20 @@ from utils.experiment import save_feature_map
 from models.submodule import *
 from sklearn.decomposition import PCA
 import cv2
+
+sys.path.append('/home/f9ql00v/depth-anything3/Depth-Anything-3-main/src')
+from depth_anything_3.model.utils.head_utils import (
+    create_uv_grid,
+    position_grid_to_embed,
+)
+
+def stat(x, name):
+    print(
+        name,
+        "mean", x.mean().item(),
+        "std", x.std().item(),
+        "max", x.abs().max().item()
+    )
 
 class patch2feature(nn.Module):
     def __init__(
@@ -15,11 +29,12 @@ class patch2feature(nn.Module):
         patch_size: int = 16,
         out_channels:  Sequence[int] = (256, 512, 1024, 1024),
         intermediate_layer_idx=(0, 1, 2, 3),
+        pos_embed: bool = False, 
     ):
         super().__init__()
         self.patch_size = patch_size
         self.intermediate_layer_idx = intermediate_layer_idx
-
+        self.pos_embed = pos_embed
         # keep channel size unless explicitly changed
         self.out_channels = out_channels or embed_dim
 
@@ -63,6 +78,46 @@ class patch2feature(nn.Module):
             output_dim, has_residual=False, inplace=False
         )
 
+        self.rn_norm = nn.ModuleList([
+            nn.GroupNorm(32, output_dim),
+            nn.GroupNorm(32, output_dim),
+            nn.GroupNorm(32, output_dim),
+            nn.GroupNorm(32, output_dim)
+        ])
+
+        self.fuse_norm = nn.ModuleList([
+                nn.GroupNorm(32, output_dim),  # after refinenet4
+                nn.GroupNorm(32, output_dim),  # after refinenet3
+                nn.GroupNorm(32, output_dim),  # after refinenet2
+                nn.GroupNorm(32, output_dim),  # after refinenet1
+        ])
+
+    def _add_pos_embed(
+        self,
+        x: torch.Tensor,
+        W: int,
+        H: int,
+        ratio: float = 0.1,
+    ) -> torch.Tensor:
+        """
+        UV positional embedding (same as DualDPT).
+        """
+        pw, ph = x.shape[-1], x.shape[-2]
+
+        pe = create_uv_grid(
+            pw,
+            ph,
+            aspect_ratio=W / H,
+            dtype=x.dtype,
+            device=x.device,
+        )
+
+        pe = position_grid_to_embed(pe, x.shape[1]) * ratio
+        pe = pe.permute(2, 0, 1)[None].expand(x.shape[0], -1, -1, -1)
+
+        print(pe.shape, x.shape)
+        return x + pe
+    
     def _fuse(self, feats: List[torch.Tensor]) -> torch.Tensor:
         """
         4-layer top-down fusion, returns finest scale features (after fusion, before neck1).
@@ -70,8 +125,7 @@ class patch2feature(nn.Module):
         l1, l2, l3, l4 = feats
 
         l1_rn = self.scratch.layer1_rn(l1)
-        print("l1_rn:  ", l1_rn.shape)
-        make_pca(l1_rn, "l1_rn_pca.png", 128)
+        #make_pca(l1_rn, "l1_rn_pca.png", 128)
         #visualize_value(l1_rn, "l1_rn_feat.png")
        #print("valid elements L1 after the conv", torch.sum(torch.isnan(l1_rn)), torch.sum(torch.isinf(l1_rn)))
         l2_rn = self.scratch.layer2_rn(l2)
@@ -81,26 +135,33 @@ class patch2feature(nn.Module):
        #print("valid elements L3 after the conv", torch.sum(torch.isnan(l3_rn)), torch.sum(torch.isinf(l3_rn)))
         l4_rn = self.scratch.layer4_rn(l4)
         print(l4_rn.shape)
-        make_pca(l4_rn, "l4_rn_pca.png", 128)
+       # make_pca(l4_rn, "l4_rn_pca.png", 128)
         #visualize_value(l4_rn, "l4_rn_feat.png")
-
+        l1_rn = self.rn_norm[0](self.scratch.layer1_rn(l1))
+        l2_rn = self.rn_norm[1](self.scratch.layer2_rn(l2))
+        l3_rn = self.rn_norm[2](self.scratch.layer3_rn(l3))
+        l4_rn = self.rn_norm[3](self.scratch.layer4_rn(l4))
         # 4 -> 3 -> 2 -> 1
         out = self.scratch.refinenet4(l4_rn, size=l3_rn.shape[2:])
+        out = self.fuse_norm[0](out)
         print("out 1st refinenet: ", out.shape)
-       
+        stat(out, "l4_rn")
        #print("valid elements after the conv", torch.sum(torch.isnan(out)), torch.sum(torch.isinf(out)))
         #visualize_value(out, "l4_out.png")
         out = self.scratch.refinenet3(out, l3_rn, size=l2_rn.shape[2:])
-        
+        out = self.fuse_norm[1](out)
+        stat(out, "l3_rn")
 
         out = self.scratch.refinenet2(out, l2_rn, size=l1_rn.shape[2:])
+        out = self.fuse_norm[2](out)
         print("out 3rd refinenet: ", out.shape)
         #visualize_value(out, "l2_out.png")
-        
+        stat(out, "l2_rn")
         #visualize_value(out, "l3_out.png")
        #print("valid elements after the conv", torch.sum(torch.isnan(out)), torch.sum(torch.isinf(out)))
         out = self.scratch.refinenet1(out, l1_rn)
-        
+        out = self.fuse_norm[3](out)
+        stat(out, "l1_rn")
         return out
     
     def forward(self, feats: List[torch.Tensor],
@@ -117,14 +178,16 @@ class patch2feature(nn.Module):
         print("##################start feature upsampling and fusion")
         for stage_idx, take_idx in enumerate(self.intermediate_layer_idx):
             x = feats[take_idx][:, patch_start_idx:]  # [B*S, N_patch, C]
-            #x = self.norm(x)
+
+            x = self.norm(x)
             print("entry shape: ", x.shape)
             x = x.permute(0, 2, 1).reshape(B, C, ph, pw)  # [B*S, C, ph, pw] C=768
-            if stage_idx == 3:
-                make_pca(x, "dinov2features.png", 384)
+            #make_pca(x, "dinov2features.png", C)
             print("xshape", x.shape)
            #print("valid input data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
             x = self.projects[stage_idx](x)  # [B*S, C, ph, pw] C here is 48, 96, 192, 384
+            if self.pos_embed:
+                x = self._add_pos_embed(x, W, H)
            #print("valid input projected data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
 
             x = self.resize_layers[stage_idx](x)  # Align scale
@@ -136,6 +199,9 @@ class patch2feature(nn.Module):
 
         # 2) Fusion pyramid (main branch only)
         fused = self._fuse(resized_feats)
+        if self.pos_embed:
+            fused = self._add_pos_embed(fused, W, H)
+        #make_pca(fused, "fused_pca.png", 128)
        #print("valid fused data before interpolation", torch.sum(torch.isnan(fused)), torch.sum(torch.isinf(fused)))
         #visualize_value(fused, "fuse_before_outconv.png")
         print("fused shape: ", fused.shape)
@@ -181,7 +247,7 @@ def _make_fusion_block(
         features=features,
         activation=nn.ReLU(inplace=inplace),
         deconv=False,
-        bn= True,
+        bn= False,
         expand=False,
         align_corners=True,
         size=size,
@@ -294,7 +360,7 @@ class FeatureFusionBlock(nn.Module):
         self.resConfUnit2 = ResidualConvUnit(features, activation, bn, groups=groups)
 
         out_features = (features // 2) if expand else features
-        self.out_conv = convbn(features, out_features, 1, 1, 0, 1)
+        self.out_conv = nn.Conv2d(features, out_features, 1, 1, 0, bias=True, groups=groups)
         
         self.skip_add = nn.quantized.FloatFunctional()
 
@@ -339,7 +405,7 @@ class easy_transition_layer(nn.Module):
 
         # keep channel size unless explicitly changed
         self.out_channels = out_channels or embed_dim
-        self.norm = nn.LayerNorm(embed_dim)
+        self.norm = nn.Identity() #nn.LayerNorm(embed_dim)
         # per-scale projection
         self.projects = nn.ModuleList([nn.Sequential(
             nn.Conv2d(embed_dim, embed_dim // 2, kernel_size=1),

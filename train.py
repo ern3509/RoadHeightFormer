@@ -9,7 +9,7 @@ import math
 from tqdm import tqdm
 from utils.dataset import RSRD
 from torch.cuda.amp import GradScaler
-from models.loss import MyLoss, LossReg, LossReg2, affine_invariant_global_loss
+from models.loss import MyLoss, LossReg, LossReg2, affine_invariant_global_loss, MSE_normal_loss
 from torch.utils.data import DataLoader
 from models.model import Elevation
 import pickle
@@ -189,7 +189,8 @@ def train_regression():
                     else:
                         ele_pred = model(imgs_left, proj_index_left)
                         #print("train ele pred shape:", ele_pred.shape)
-                        ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
+                        with torch.no_grad():
+                            ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
                     
                     loss_all = loss_func(ele_pred, ele_gt, ele_mask)
 
@@ -197,7 +198,9 @@ def train_regression():
                     #metric for evaluation
                     ele_mask_roi = torch.logical_and(ele_gt > -ele_range, ele_gt < ele_range)
                     eval_mask = torch.logical_and(ele_mask_roi, ele_mask)
-                    mae_l1 = torch.abs(ele_pred[eval_mask] - ele_gt[eval_mask]).mean()
+                    print("len valid_pred", len(ele_pred[eval_mask]))
+                    print("len val gt", len(ele_gt[eval_mask]))
+                    mae_l1 = torch.abs(ele_pred.detach()[eval_mask]- ele_gt[eval_mask]).mean()
                     
                     #introduce affine invariant loss
                     #pcd_predictions = get_pointcloud_from_heightmap(ele_pred, train_loader.dataset.hori_centers)
@@ -255,7 +258,7 @@ def train_regression():
                 wandb.log({"train/lr": scheduler.get_last_lr()[0]}, step = global_step)
                 wandb.log({"train/mae": mae_l1.item()}, step=global_step)
                 epoch_active_time = time.time() - start_time
-                loss_wandb = loss_all.data.item()
+                loss_wandb = loss_all.data.detach().item()
 
                 if np.isnan(loss_wandb):
                     print('nan loss!')
@@ -319,106 +322,72 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
     gt_vmax = [14, 14, 14]
     h_min = - ele_range*100
     h_max = ele_range*100
+    total_error = 0.0
+    total_valid_pixels = 0
     #save file for visualization pytorch
     ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
-    
-    for s in range(len(fixed_eval_indices)):
-        if args.normalize:
-            print("undo normalization in visualization of some testing sample")
-            ele_pred_fixed = unnormalize(ele_pred_fixed, h_min, h_max)
-        
-        if not logged_eval_static:
-            gt_np = np.ma.masked_where(
-                        eval_mask_fixed[s].cpu().numpy() == 0,
-                        eval_gt_fixed[s].cpu().numpy(),
-                    )
-            gt_vmin[s] = gt_np.min()
-            gt_vmax[s] = gt_np.max()
-
-        height_prediction = ele_pred_fixed[s]
-        combined_img = wandb_combined_image(
-                        height_prediction.squeeze(),
-                        eval_gt_fixed[s],
-                        eval_mask_fixed[s],
-                        eval_imgs_fixed[s],
-                        caption=f"Combined Evaluation Visualization at step {global_step}",
-                        vmin=gt_vmin[s],
-                        vmax=gt_vmax[s],
-                        test=True
-                        )
-        wandb.log({"test/combined_sample_" + str(s): combined_img}, step=global_step)
-    logged_eval_static = True
-    for i, sample in enumerate(test_loader):
-        if args.stereo:
-            (imgs_left, imgs_right, ele_gt, ele_mask, proj_index_left, proj_index_right, _) = sample
-            imgs_right, proj_index_right = imgs_right.cuda(), proj_index_right.cuda()
-        else:
-            (imgs_left, ele_gt, ele_mask, proj_index_left, _) = sample
-        imgs_left, ele_gt, ele_mask, proj_index_left = imgs_left.cuda(), ele_gt.cuda(), ele_mask.cuda(), proj_index_left.cuda()
-        
-        with torch.cuda.amp.autocast(dtype=torch.float16):
-
-            if args.stereo:
-                ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
-            else:
-                ele_pred = model(imgs_left, proj_index_left)
-                ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
-                #ele_pred = ele_pred[:, 0, :, :] #from B, 2, H, W to B, H, W
-                #ele_pred_fixed = ele_pred_fixed[:, 0, :, :]
-            
+    with torch.no_grad():
+        for s in range(len(fixed_eval_indices)):
             if args.normalize:
-                print("undo normalization in testing")
-                h_min = - ele_range*100
-                h_max = ele_range*100
-                ele_pred = unnormalize(ele_pred, h_min, h_max)
-
-            metric.compute(ele_pred, ele_gt, ele_mask)
-            #ele_mask = torch.logical_and(roi_mask, ele_mask)
-            loss_all = sum_absolute_error(ele_pred[ele_mask>0], ele_gt[ele_mask>0]) / ele_mask.sum().item()
-            log_dict = {}
-            """"
-            if i == 0:
-                # Log static data ONCE
-                if not logged_eval_static:
-                    for s in range(len(fixed_eval_indices)):
-                        gt_np = np.ma.masked_where(
-                                eval_mask_fixed[s].cpu().numpy() == 0,
-                                eval_gt_fixed[s].cpu().numpy(),
-                            )
-                        gt_vmin[s] = gt_np.min()
-                        gt_vmax[s] = gt_np.max()
-                        print("gt min and max:", gt_vmin[s], gt_vmax[s])
-                        log_dict[f"eval/static/sample_{s}/image"] = \
-                            wandb_rgb_image(eval_imgs_fixed[s], caption="Eval image")
-
-                        log_dict[f"eval/static/sample_{s}/gt"] = \
-                            wandb_heightmap_image(eval_gt_fixed[s], eval_mask_fixed[s], caption="GT (cm)")
-
-                    logged_eval_static = True
-
-                # Log predictions WITH SLIDER
-                for s in range(len(fixed_eval_indices)):
-                    height_prediction = ele_pred_fixed[s]	
-                    print("height prediction before softmax shape:", height_prediction.shape)
-                    #height_prediction = torch.sum(height_prediction * model.ele_values[0],dim=0)
-                    img = wandb_heightmap_image(
-                            height_prediction.squeeze(),
-                            torch.ones_like(height_prediction),
-                            caption=f"step {global_step}",
-                            vmin= gt_vmin[s],
-                            vmax= gt_vmax[s]
+                print("undo normalization in visualization of some testing sample")
+                ele_pred_fixed = unnormalize(ele_pred_fixed, h_min, h_max)
+            
+            if not logged_eval_static:
+                gt_np = np.ma.masked_where(
+                            eval_mask_fixed[s].cpu().numpy() == 0,
+                            eval_gt_fixed[s].cpu().numpy(),
                         )
-                    error_img = wandb_error_map(height_prediction.squeeze(), eval_gt_fixed[s], eval_mask_fixed[s], caption=f"Error map at step {global_step} of sample {s}")
-                    wandb.log({"eval/pred_sample_" + str(s): img}, step=global_step)
-                    wandb.log({"eval/error_map_sample_" + str(s): error_img}, step=global_step)
+                gt_vmin[s] = gt_np.min()
+                gt_vmax[s] = gt_np.max()
 
-                wandb.log(log_dict, step=global_step)
-"""""
-                #CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(img_prob.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_pred' + global_step.__str__() + '.png')
-                #CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_gt' + global_step.__str__() + '.png')
+            height_prediction = ele_pred_fixed[s]
+            combined_img = wandb_combined_image(
+                            height_prediction.squeeze(),
+                            eval_gt_fixed[s],
+                            eval_mask_fixed[s],
+                            eval_imgs_fixed[s],
+                            caption=f"Combined Evaluation Visualization at step {global_step}",
+                            vmin=gt_vmin[s],
+                            vmax=gt_vmax[s],
+                            test=True
+                            )
+            wandb.log({"test/combined_sample_" + str(s): combined_img}, step=global_step)
+        logged_eval_static = True
+        for i, sample in enumerate(test_loader):
+            if args.stereo:
+                (imgs_left, imgs_right, ele_gt, ele_mask, proj_index_left, proj_index_right, _) = sample
+                imgs_right, proj_index_right = imgs_right.cuda(), proj_index_right.cuda()
+            else:
+                (imgs_left, ele_gt, ele_mask, proj_index_left, _) = sample
+            imgs_left, ele_gt, ele_mask, proj_index_left = imgs_left.cuda(), ele_gt.cuda(), ele_mask.cuda(), proj_index_left.cuda()
             
-            
-            eval_loss += loss_all
+            with torch.cuda.amp.autocast(dtype=torch.float16):
+
+                if args.stereo:
+                    ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
+                else:
+                    ele_pred = model(imgs_left, proj_index_left)
+                    ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
+                    #ele_pred = ele_pred[:, 0, :, :] #from B, 2, H, W to B, H, W
+                    #ele_pred_fixed = ele_pred_fixed[:, 0, :, :]
+                
+                print("ele_mask: ", ele_mask)
+                if args.normalize:
+                    print("undo normalization in testing")
+                    h_min = - ele_range*100
+                    h_max = ele_range*100
+                    ele_pred = unnormalize(ele_pred, h_min, h_max)
+
+                metric.compute(ele_pred, ele_gt, ele_mask)
+                #ele_mask = torch.logical_and(roi_mask, ele_mask)
+
+                abs_error = (torch.abs(ele_pred - ele_gt)) * ele_mask
+                abs_error = abs_error.sum()
+                total_error += abs_error.item()
+                total_valid_pixels += ele_mask.sum().item()
+
+
+        eval_loss = total_error / total_valid_pixels
 
     model.train()
     metric_values = metric.get_metric()
@@ -488,7 +457,7 @@ def train():
                     height_prediction =  F.softmax(ele_pred, dim= 1)
                     
                     height_prediction = torch.sum(height_prediction * model.ele_values,dim=1)
-                    mae_l1 = torch.abs(height_prediction[eval_mask] - ele_gt[eval_mask]).mean()
+                    mae_l1 = (torch.abs(height_prediction[eval_mask] - ele_gt[eval_mask])).mean()
                     #loss_reprojection = aloss(ele_pred, gt_depth, imgs_left, I_previous, I_next, ground_info, extrinsics, extrinsics_next, extrinsics_previous, intrinsics)
 
                 
@@ -590,7 +559,8 @@ def test_sample(test_loader, global_step, run, logged_eval_static=False):
     h_max = ele_range*100
     #save file for visualization pytorch
     ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
-
+    total_error = 0.0
+    total_valid_pixels = 0
 
     for s in range(len(fixed_eval_indices)):
         if args.normalize:
@@ -636,57 +606,22 @@ def test_sample(test_loader, global_step, run, logged_eval_static=False):
             metric.compute(ele_pred, ele_gt, ele_mask)
             #print("youuuu", ele_pred.shape, ele_gt.shape)
             #ele_pred = torch.tensor(ele_pred.unsqueeze(dim=0))
-            loss_all = sum_absolute_error(ele_pred[ele_mask > 0], ele_gt[ele_mask > 0]) / ele_mask.sum().item()
-            log_dict = {}
-            
-            """ if i == 0:
-                # Log static data ONCE
-                if not logged_eval_static:
-                    for s in range(len(fixed_eval_indices)):
-                        gt_np = np.ma.masked_where(
-                                eval_mask_fixed[s].cpu().numpy() == 0,
-                                eval_gt_fixed[s].cpu().numpy(),
-                            )
-                        gt_vmin[s] = gt_np.min()
-                        gt_vmax[s] = gt_np.max()
 
-                        log_dict[f"eval/static/sample_{s}/image"] = \
-                            wandb_rgb_image(eval_imgs_fixed[s], caption="Eval image")
+            abs_error = torch.abs(
+                ele_pred[ele_mask] - ele_gt[ele_mask]
+            ).sum()
 
-                        log_dict[f"eval/static/sample_{s}/gt"] = \
-                            wandb_heightmap_image(eval_gt_fixed[s], eval_mask_fixed[s], caption="GT (cm)")
+            total_error += abs_error.item()
+            total_valid_pixels += ele_mask.sum().item()
 
-                    logged_eval_static = True
-            
-                # Log predictions WITH SLIDER
-                pred_images = []
-                for s in range(len(fixed_eval_indices)):
-                    height_prediction = ele_pred_fixed[s]	
-                    print("height prediction before softmax shape:", height_prediction.shape)
-                    #height_prediction = torch.sum(height_prediction * model.ele_values[0],dim=0)
-                    img = wandb_heightmap_image(
-                            height_prediction.squeeze(),
-                            torch.ones_like(height_prediction),
-                            caption=f"step {global_step}",
-                            vmin=gt_vmin[s],
-                            vmax=gt_vmax[s]
-                        )
-                    error_img = wandb_error_map(height_prediction.squeeze(), eval_gt_fixed[s], eval_mask_fixed[s], caption=f"Error map at step {global_step} of sample {s}")
-                    wandb.log({"eval/pred_sample_" + str(s): img}, step=global_step)
-                    wandb.log({"eval/error_map_sample_" + str(s): error_img}, step=global_step)
 
-                wandb.log(log_dict, step=global_step)  """
+    eval_loss = total_error / total_valid_pixels
 
-                #CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(img_prob.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_pred' + global_step.__str__() + '.png')
-                #CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Heightmap/' + 'test_' + '_gt' + global_step.__str__() + '.png')
-            
-            
-            eval_loss += loss_all
-
-    model.train()
     metric_values = metric.get_metric()
     metric.clear()
-    eval_loss /= len(test_loader)
+
+    model.train()
+
     return metric_values, eval_loss
 
 def get_pointcloud_from_heightmap(heightmap, centers):
@@ -828,7 +763,6 @@ def wandb_combined_image(
 
 
     fig.tight_layout()
-
     # --- Return as wandb.Image ---
     return wandb.Image(fig, caption=caption)
 
@@ -1032,9 +966,10 @@ if __name__ == '__main__':
     ele_range = train_set.y_range
     voxel_ele_res = train_set.grid_res[1]
     num_grids = [train_set.num_grids_x, train_set.num_grids_y, train_set.num_grids_z]
+    hori_centers = train_set.hori_centers.to(device) #B, H, W, 2 [0->x, 1->z]
 
 
-    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize, args.pred_head_dim, args.dino).cuda()
+    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize, args.pred_head_dim).cuda() #, args.dino
     early_stopping = EarlyStopping(patience=300, min_delta=0.001)
     print('num params:', sum(p.numel() for p in model.parameters() if p.requires_grad))
     print(model)
@@ -1052,13 +987,15 @@ if __name__ == '__main__':
 
     if args.regression:
         if args.loss == 'L1':
-            loss_func = LossReg(ele_range, args.normalize, 'L1').cuda()
+            loss_func = LossReg(ele_range, args.normalizse, 'L1').cuda()
         elif args.loss == 'scale_affine':
             loss_func = affine_invariant_global_loss()
         elif args.loss == 'MSE':
             loss_func = LossReg(ele_range, args.normalize, 'MSE').cuda()
+        elif args.loss == 'lpips':
+            loss_func = LossReg(ele_range, args.normalize, 'lpips').cuda()
         else:
-            loss_func = LossReg2(ele_range, args.gradient_weight, args.normalize).cuda()
+            loss_func = MSE_normal_loss(ele_range, hori_centers=hori_centers, normalize=args.normalize).cuda()
     else:
         loss_func = MyLoss(ele_range, voxel_ele_res, args.cla_res).cuda()
     metric = Metric(ele_range, train_set.num_grids_z, distance_wise=False)
@@ -1087,7 +1024,7 @@ if __name__ == '__main__':
         model.load_state_dict(state_dict, strict=True) """
  
     scaler = GradScaler()
-
+    print("model_state", model.feature_extraction.training)
     lr_encoder = 1e-5
     encoder_params = list(model.feature_extraction.parameters())
     decoder_params = [param for name, param in model.named_parameters() if 'feature_extraction' not in name]

@@ -482,8 +482,23 @@ if __name__ == "__main__":
     pp_flow = reprojection_loss.get_pp_flow(epipoles, R, t, K, gt__height, ground_truth_depth, d)
 
     cv2.imwrite("warped_image.png", target_warped.squeeze(0).permute(1, 2, 0).byte().numpy()) """
-    test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='val', down_scale=2, preprocessed_data = True)
+    # test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='val', down_scale=2, preprocessed_data = True)
 
-    train_loader = DataLoader(test_set, 1, shuffle=True, num_workers=8, drop_last=True, pin_memory=True)
+    # train_loader = DataLoader(test_set, 1, shuffle=True, num_workers=8, drop_last=True, pin_memory=True)
     
-    compute_target_stats(train_loader)
+    # compute_target_stats(train_loader)
+
+    w1 = torch.load("patch_embed_proj.pt")
+    w2 = torch.load("patch_embed_proj_da3.pt")
+    print(w1, "/w2",w2)
+    all_equal = True
+
+    for k in w1:
+        if not torch.equal(w1[k], w2[k]):
+            print(f"❌ Different weight: {k}")
+            all_equal = False
+            diff = (w1[k] - w2[k]).abs().max()
+            print(k, diff)
+
+    if all_equal:
+        print("✅ All weights are identical!")

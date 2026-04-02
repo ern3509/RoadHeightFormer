@@ -389,12 +389,8 @@ from .efficientnet import efficientnet_feature
 from utils.experiment import save_feature_map
 from .patch2feature import _make_scratch, _make_fusion_block, patch2feature, easy_transition_layer
 import warnings
-from contextlib import nullcontext
-from models.submodule import *
+import cv2
 from sklearn.decomposition import PCA
-import pandas as pd
-import cv2, os
-from PIL import Image
 
 import sys
 sys.path.append('/home/f9ql00v/depth-anything3/Depth-Anything-3-main/src')
@@ -414,55 +410,33 @@ def print_types(obj, indent=0):
        print(f"{prefix}{type(obj).__name__}")
 
 class Elevation(nn.Module):
-    def __init__(self, stereo,  num_grids, ele_range, cla_res, regression=False, backbone = 'efficientnet', normalize=False, pred_dim =256, dino = "small"):
+    def __init__(self, stereo,  num_grids, ele_range, cla_res, regression=False, backbone = 'efficientnet', normalize=False, pred_dim =256):
         super(Elevation, self).__init__()
-
         self.stereo = stereo
         self.num_grids_x, self.num_grids_y, self.num_grids_z = num_grids
         self.ele_range = ele_range   # in meter
         self.regression = regression
         self.backbone = backbone
-        self.context = torch.no_grad() if 'frozen' in self.backbone else nullcontext()
-        print(self.context)
+
         self.cla_res = cla_res
         self.num_classes = int(2 * self.ele_range*100 / self.cla_res)    #the smaller the clas_res, the more classes we have
-        ele_values = -torch.arange(self.num_classes, dtype=torch.float32, device='cuda')*self.cla_res + self.ele_range*100 - self.cla_res/2 #19.75, 19.25, 18.75, ..., -18.75, -19.25, -19.75
+        ele_values = -torch.arange(self.num_classes, dtype=torch.float32, device='cuda')*self.cla_res + self.ele_range*100 - self.cla_res/2 #19.75, 19.25, 18.75, ..., -18.75, -19.25, 19.75
         self.ele_values = ele_values.reshape(1, self.num_classes, 1, 1)
         
         self.patch2feat = True
         # Replace efficientnet_feature with DINOv2 backbone
-        model_name = ""
-        out_channels = None
-
-
+        self.patchsize = int(14)
         if 'DepthAnything3' in backbone :
-            if dino == "small":
-                embed_dim = 384
-                model_name = "depth-anything/DA3-SMALL"
-                out_channels = [48, 96, 192, 384]
-            elif dino == "Large":
-                print("large model!!!")
-                embed_dim = 3072
-                model_name = "depth-anything/DA3NESTED-GIANT-LARGE"
-                out_channels = [256, 512, 1024, 1024]
-            model = DepthAnything3.from_pretrained(model_name)
-
-
-            print("model_depthAnything3", model)
-            encoder = model.model.backbone if dino == "small" else model.model.da3.backbone
+            model = DepthAnything3.from_pretrained("depth-anything/DA3-SMALL")
+            #print("model_depthAnything3", model)
+            encoder = model.model.backbone
             ##print("encoder", encoder)
-
-            #########################
-            #temporal change of backbone
-            encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
-            self.patchsize = 14
-            #################
             self.feature_extraction = encoder
             if self.patch2feat:
-                self.transition_layer = patch2feature(embed_dim=embed_dim, patch_size=14, output_dim = pred_dim,
-                                                      out_channels = out_channels)
+                self.transition_layer = patch2feature(embed_dim=768, patch_size=14, output_dim = pred_dim,
+                                                      out_channels = [48, 96, 192, 384])
             else:
-                self.transition_layer = easy_transition_layer(embed_dim=embed_dim, patch_size=14, out_channels = pred_dim)
+                self.transition_layer = easy_transition_layer(embed_dim=768, patch_size=14, out_channels = pred_dim)
             self.feat_channel = pred_dim
         
         else:
@@ -482,74 +456,58 @@ class Elevation(nn.Module):
                 #  regressor for mono
                 self.ele_head = EleCla2D(self.feat_channel, num_grids, self.num_classes)
 
-        for m in self.modules():
-            
-            if isinstance(m, nn.Conv2d):
-                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-                m.weight.data.normal_(0, math.sqrt(2. / n))
-            elif isinstance(m, nn.Conv3d):
-                n = m.kernel_size[0] * m.kernel_size[1] * m.kernel_size[2] * m.out_channels
-                m.weight.data.normal_(0, math.sqrt(2. / n))
-            elif isinstance(m, nn.BatchNorm2d):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
-            elif isinstance(m, nn.BatchNorm3d):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
-            elif isinstance(m, nn.Linear):
-                m.bias.data.zero_()
+        if 'DepthAnything3' in backbone:
+            self.transition_layer.apply(self._init_weights)
+            self.ele_head.apply(self._init_weights)
+        else:
+            # efficientnet branch (not pretrained)
+            self.feature_extraction.apply(self._init_weights)
+            self.ele_head.apply(self._init_weights)
 
-        self.log = True
+    def _init_weights(self,m):
+        if isinstance(m, nn.Conv2d):
+            n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+            m.weight.data.normal_(0, math.sqrt(2. / n))
+            if m.bias is not None:
+                m.bias.data.zero_()
+        elif isinstance(m, nn.Conv3d):
+            n = m.kernel_size[0] * m.kernel_size[1] * m.kernel_size[2] * m.out_channels
+            m.weight.data.normal_(0, math.sqrt(2. / n))
+        elif isinstance(m, nn.BatchNorm2d):
+            m.weight.data.fill_(1)
+            m.bias.data.zero_()
+        elif isinstance(m, nn.BatchNorm3d):
+            m.weight.data.fill_(1)
+            m.bias.data.zero_()
+        elif isinstance(m, nn.Linear):
+            m.bias.data.zero_()
+        elif isinstance(m, nn.ConvTranspose2d):
+            n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+            m.weight.data.normal_(0, math.sqrt(2. / n))
+            if m.bias is not None:
+                m.bias.data.zero_()
 
     def forward(self, imgs_left, proj_index_left, *args):
-        pca = PCA(n_components= 3)
         # proj_index: [num_samples, 2, num_grids_z*num_grids_x*num_grids_y]
         if 'DepthAnything3' in self.backbone:
-            with self.context:
+            with torch.no_grad():
            #print("start feature extraction with DepthAnything3 backbone")
             # add a dimension to input image
-                imgs_left = imgs_left  #.unsqueeze(1) # [B, 1, C, H, W] 
-                imgs_left = imgs_left.transpose(-1, -2)  # [B, 1, C, W, H] 
-                print(imgs_left.shape)
-                *_, W, H = imgs_left.shape
-                #temporal features_dict = self.feature_extraction.forward_features(imgs_left)
-                #temporal features = features_dict['x_norm_patchtokens']
-
-                features = self.feature_extraction.get_intermediate_layers(imgs_left,  [5, 7, 9, 11])  #tuple of pair of feautures (patch embed and 1dfeature vector) # , aux_features
-                
-                #features_fresh = self.feature_extraction.pretrained.forward_features(imgs_left)
-                #features_fresh =  features_fresh['x_norm_patchtokens']
-                print(len(features))
-                print(features[0].shape)
-                B, N, C = features[0].shape
-                #print("Extracted features before projection shape:", features[0][0].shape)
-                features_ = [feat.reshape(B, N, C) for feat in features]
-
-                test_feat =  features_[-1][0].cpu().detach() #features[0].cpu().detach() #-1 last element of the list 0 for first element of the batch
-
-                #test_pca = pca.fit_transform(test_feat)
-                pca.fit(test_feat)
-                pca_features = pca.transform(test_feat)
-                print("PCA_features:", pca_features.shape)
-                pca_features = pca_features.reshape(int(W/self.patchsize), int(H/self.patchsize), 3)
-                img = pca_features[:, :, 2]
-                min_vals = pca_features.min(axis=2, keepdims=True)
-                max_vals = pca_features.max(axis=2, keepdims=True)
-
-                pca_features = (pca_features - min_vals) / (max_vals - min_vals + 1e-8)
-                pca_features = (pca_features * 255).astype(np.uint8)
-                cv2.imwrite("pca_of_last layer_features.png", pca_features)
-
-                img = (img - img.min()) / (img.max() - img.min() + 1e-8)
-                img = (img * 255).astype(np.uint8)    
-                Image.fromarray(img).save("pca_first_component.png")
+                B, C, W, H = imgs_left.shape
+                imgs_left = imgs_left.unsqueeze(1) # [B, 1, C, H, W] 
+                #imgs_left = imgs_left.transpose(-2, -1)
+                print("me", imgs_left.shape)
+                features, aux_features = self.feature_extraction(imgs_left)  #tuple of pair of feautures (patch embed and 1dfeature vector)
+                B, S, N, C = features[0][0].shape
+                print("Extracted features before projection shape:", features[0][0].shape)
+                features = [feat[0].reshape(B*S, N, C) for feat in features]
 
                 #print_types(features)
-                #print("features before projection", len(features_left[1]), features_left[1].shape, features_left[0][3][1].shape)
+        
             if self.patch2feat:
-                features_left = self.transition_layer(features_, 532, 952, 133, 238)   #B*S, C, 952, 518
+                features_left = self.transition_layer(features, W, H, int(W/4), int(H/4))   #B*S, C, 952, 518
             else:
-                features_left = self.transition_layer(features_, 532, 952, 133, 238)   #B, C, 952, 518
+                features_left = self.transition_layer(features, W, H, W/4, H/4)   #B, C, 952, 518
            #print("Extracted features shape:", features_left.shape)
         
         else:
@@ -558,38 +516,11 @@ class Elevation(nn.Module):
             #print("Extracted features shape:", features_left.shape)
             
         B, C, H, W = features_left.shape
-        #visualize PCA
-        if self.log:
-            features_left_cpu = features_left[0].cpu().detach().permute(1, 2, 0).reshape(-1, C)
-            print("feature_left_shape:", features_left_cpu.shape)
-            features_pca = pca.fit_transform(features_left_cpu).reshape((H, W, 3))
-            img = features_pca[:, :, 0]
-
-            print("pca_features: ", features_pca.shape)
-            if not os.path.exists("pca_of_features.png"):
-                min_vals = features_pca.min(axis=2, keepdims=True)
-                max_vals = features_pca.max(axis=2, keepdims=True)
-
-                features_pca = (features_pca - min_vals) / (max_vals - min_vals + 1e-8)
-                features_pca = (features_pca * 255).astype(np.uint8)
-                cv2.imwrite("pca_of_features.png", features_pca)
-            
-            self.log = False
-        img = (img - img.min()) / (img.max() - img.min() + 1e-8)
-        img = (img * 255).astype(np.uint8)
-
-        Image.fromarray(img).save("pca_first_component_final.png")
-
-
-        B, C, H, W = features_left.shape
         features_left = features_left.reshape(B, C, -1)
         linear_indices = proj_index_left[:, 1, :] * W + proj_index_left[:, 0, :]
 
        #print("linear indices:" ,linear_indices.shape)
-        #voxel_feat_left = F.interpolate(features_left, (self.num_grids_z, self.num_grids_x*self.num_grids_y), mode='bilinear')
         voxel_feat_left = features_left.gather(dim=2, index=linear_indices.unsqueeze(1).expand(-1, C, -1))
-
-
         #print("voxel feet after gather shape:", voxel_feat_left.shape)
 
         voxel_feat_left = voxel_feat_left.reshape(B, C, self.num_grids_z, self.num_grids_x, self.num_grids_y)
@@ -711,7 +642,7 @@ class DinoV2SpatialDecoder(nn.Module):
 
             # tokens → feature map
             x = x.permute(0, 2, 1).reshape(B, C, ph, pw) # [B, C, ph, pw]
-            #save_feature_map(x[0, 0, :, :], f"patch_viz {stage_idx} .png" )
+            save_feature_map(x[0, 0, :, :], f"patch_viz {stage_idx} .png" )
             # project channels
             x = self.projects[stage_idx](x) # [B, out_channels, ph, pw]
 
@@ -731,7 +662,7 @@ class DinoV2SpatialDecoder(nn.Module):
         fused = torch.stack(resized_feats, dim=0) # [4, B, out_channels, H, W]
         fused = fused.sum(dim=0)
         fused = self.fuse(fused) 
-        #save_feature_map(fused[0, 0, :, :], "fused_feature_map.png")
+        save_feature_map(fused[0, 0, :, :], "fused_feature_map.png")
        #print("fused after conv shape:", fused.shape) #[B, out_channels, H, W]
        #print("Fused feature map border values:", fused[0, :, 0, :], fused[0, :, -1, :])
         return fused

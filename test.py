@@ -113,18 +113,19 @@ if __name__ == '__main__':
         print('Testing RoadBEV-mono!')
 
     # dataset, dataloader
-    if "CARDSet" in args.dataset:
+    if "CARDSet" == args.dataset:
         test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='test', down_scale=args.down_scale)
 
         #test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/RoadHeightFormer_test.txt', mode='test', down_scale=args.down_scale)
 
-    elif 'CARDSetV2Small' in args.dataset:
+    elif 'CARDSetV2Small' == args.dataset:
         test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
     
-    elif 'CARDSetSmall' in args.dataset:
+    elif 'CARDSetSmall' == args.dataset:
+        print("Small preprocessed dataset")
         test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_small_dataset.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed)
 
-    elif 'RSRD' in args.dataset:
+    elif 'RSRD' == args.dataset:
         test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
 
     else:
@@ -134,7 +135,7 @@ if __name__ == '__main__':
     #test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
     #test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='test', down_scale=args.down_scale)
     #test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
-    test_loader = DataLoader(test_set, 1, shuffle=False, num_workers=1, drop_last=False, pin_memory=True)
+    test_loader = DataLoader(test_set, 1, shuffle=False, num_workers=4, drop_last=False, pin_memory=True)
     print('test set:', len(test_set))
     log_dir = "testing_files"
     os.makedirs(log_dir, exist_ok=True)

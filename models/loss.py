@@ -4,6 +4,8 @@ from torch import nn
 from typing import Union, Tuple, Optional, Callable
 import math
 import utils3d
+from utils.normals import normal_loss
+import lpips
 
 class MyLoss(nn.Module):
     def __init__(self, ele_range, voxel_ele_res, cla_res=1):
@@ -57,8 +59,14 @@ class LossReg(nn.Module):
         self.ele_range = ele_range*100
         if type_of_loss == 'L1':
             self.loss_func = nn.L1Loss(reduction='mean')
+            self.loss_type = "L1"
         elif type_of_loss == 'MSE':
             self.loss_func = CustomMSELoss(reduction='mean')
+            self.loss_type = "MSE"
+        elif type_of_loss == "lpips":
+            self.loss_type = "lpips"
+            self.loss_func = lpips.LPIPS(net = "vgg")
+            print("using perceptual loss")
         self.normalize = normalize
         self.losstype = type_of_loss
 
@@ -68,24 +76,30 @@ class LossReg(nn.Module):
         # ele_gt:   [B, H, W]
         # ele_mask: [B, H, W]
         #print("Erwannnn",ele_pred.shape, ele_gt.shape, ele_mask.shape)
-        print("ele_pred is nan", torch.sum(torch.isnan(ele_pred)))
+        #print("ele_pred is nan", torch.sum(torch.isnan(ele_pred)))
         ele_mask_roi = torch.logical_and(ele_gt > -self.ele_range, ele_gt < self.ele_range)
         ele_mask = torch.logical_and(ele_mask_roi, ele_mask)
-        ele_pred = ele_pred[ele_mask]
-        print("Regression Loss:L1")
+        ele_pred_masked = ele_pred[ele_mask]
+        #print("Regression Loss:L1")
         #ele_pred = ele_pred[:, 0:1].squeeze(1)[ele_mask]
-        ele_gt = ele_gt[ele_mask]
+        total_cell = ele_gt.shape[-1] * ele_gt.shape[-2]
+        ele_gt_masked = ele_gt[ele_mask]
         gt_min = - self.ele_range
         gt_max = self.ele_range
         if self.normalize:
             print("normalized")
-            gt_scaled = (2 * ele_gt - (gt_max + gt_min)) / (gt_max - gt_min)
+            gt_scaled = (2 * ele_gt_masked - (gt_max + gt_min)) / (gt_max - gt_min)
             #pred_scaled = (ele_pred * (gt_max - gt_min) / 2) + ((gt_max + gt_min) / 2)
 
             assert(gt_scaled.shape == ele_gt.shape)
-            loss = self.loss_func(ele_pred, gt_scaled)
+            loss = self.loss_func(ele_pred_masked, gt_scaled)
         else:
-            loss = self.loss_func(ele_pred, ele_gt)
+            print("total cell", total_cell)
+            print("mask", ele_mask.shape)
+
+            loss = self.loss_func(ele_pred_masked, ele_gt_masked) if self.loss_type == "L1" else self.loss_func(ele_pred, ele_gt, ele_mask, total_cell)
+            loss = self.loss_func(ele_pred_masked, ele_gt_masked).mean(dim=0) if self.loss_type == "lpips" else loss
+            
 
         return loss
     
@@ -156,14 +170,18 @@ class HeteroscedasticNLLLoss(nn.Module):
     
     
 class LossReg2(nn.Module): #neg loglik + gradient loss
-    def __init__(self, ele_range, gradient_weight=0.01, normalize=False):
+    def __init__(self, ele_range, gradient_weight=0.01, normalize=False, type_of_loss = "L1"):
         super(LossReg2, self).__init__()
         self.normalize = normalize 
         self.gradientloss = GradientLoss()
         self.nll = HeteroscedasticNLLLoss()
         self.ele_range = ele_range*100
         self.gradient_weight = gradient_weight
-        self.l1loss = nn.L1Loss(reduction='mean')
+        if type_of_loss == 'L1':
+            self.loss_func = nn.L1Loss(reduction='mean')
+        elif type_of_loss == 'MSE':
+            self.loss_func = CustomMSELoss(reduction='mean')
+            
     def forward(self, ele_pred, ele_gt, ele_mask):
         # ele_pred: [B, 2, H, W]  mean and variance
         # ele_gt:   [B, H, W]
@@ -192,8 +210,40 @@ class LossReg2(nn.Module): #neg loglik + gradient loss
         ele_gt = ele_gt[mask]
         l1loss = self.l1loss(ele_pred, ele_gt)
 
+        return l1loss + self.gradient_weight * loss_grad  #l1loss, loss_grad, 
 
-        return l1loss, loss_grad, l1loss + self.gradient_weight * loss_grad
+class normalloss(nn.Module):
+    def __init__(self, ele_range, hori_centers):
+        super().__init__()
+        self.ele_range = ele_range*100
+        self.hori_centers = hori_centers
+    
+    def forward(self, ele_pred, ele_gt, ele_mask):
+        roi_mask = torch.logical_and((ele_gt > -self.ele_range),(ele_gt < self.ele_range))
+        mask = torch.logical_and(roi_mask,ele_mask)
+    	
+        loss = normal_loss(ele_pred, ele_gt, self.hori_centers, mask)
+
+        return loss
+
+class MSE_normal_loss(nn.Module):
+    def __init__(self, ele_range, hori_centers, normalize = False):
+        super().__init__()
+        self.ele_range = ele_range
+        self.hori_centers = hori_centers
+        self.normal_loss = normalloss(ele_range, hori_centers)
+        self.MSE_loss = LossReg(ele_range, normalize, type_of_loss='MSE')
+
+    def forward(self, ele_pred, ele_gt, ele_mask):
+        MSE_loss = self.MSE_loss(ele_pred, ele_gt, ele_mask)
+        normal_loss = self.normal_loss(ele_pred, ele_gt, ele_mask)
+
+        print("loss information \n")
+        print("MSE_loss: ", MSE_loss)
+        print("normal_loss:", normal_loss)
+
+        return MSE_loss + 0.1 * normal_loss
+
 
 class LossReg3(nn.Module):
     def __init__(self, ele_range, gradient_weight):
@@ -467,7 +517,7 @@ class CustomMSELoss(nn.Module):
         super(CustomMSELoss, self).__init__()
         self.reduction = reduction
     
-    def forward(self, pred, target):
+    def forward(self, pred, target, mask, total_valid_pixel):
         """
         Args:
             pred: [B, ...] - Predicted values
@@ -477,6 +527,8 @@ class CustomMSELoss(nn.Module):
             loss: scalar - Loss value
         """
         # Compute squared error
+        print("target", target.shape)
+        print("pred", pred.shape)
         squared_error = (pred - target) ** 2
         
         # Reshape to [B, -1] to compute per-sample sum
@@ -485,16 +537,31 @@ class CustomMSELoss(nn.Module):
         
         # Sum for each sample
         per_sample_loss = squared_error_flat.sum(dim=1)  # [B]
+        n_possible = total_valid_pixel
+        if mask is not None:
+            mask_flat = mask.reshape(batch_size, -1).float()        # [B, N]
+            n_valid = mask_flat.sum(dim=1)                          # [B]
+
+            weight = n_valid / n_possible                           # [B]
+
+            per_sample_loss = (squared_error_flat * mask_flat).sum(dim=1)  # [B]
+        else:
+            weight = 1.0
+
+        weighted_loss = weight * per_sample_loss                    # [B]
+
+        possible_valid_cells = squared_error.shape[-1] * squared_error.shape[-2]
+        print("possible valid:", possible_valid_cells)
         
         if self.reduction == 'mean':
             # Mean across batch
-            return per_sample_loss.mean()
+            return weighted_loss.mean()
         elif self.reduction == 'sum':
             # Sum across batch
-            return per_sample_loss.sum()
+            return weighted_loss.sum()
         else:
             # Return per-sample losses
-            return per_sample_loss
+            return weighted_loss
 
 class Custom_L1loss(nn.Module):
     def __init__(self, reduction='mean'):
