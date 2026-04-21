@@ -16,7 +16,7 @@ import os
 from utils.metric import Metric
 from utils.experiment import *
 import numpy as np
-from CARDSet.dataset import CARDSetDataset, CARDSetDatasetV2Smalldataset
+from cardset.dataset import CARDSetDataset, CARDSetDatasetV2Smalldataset
 
 def unnormalize(ele_pred, h_min, h_max):
     height = ele_pred[:, 0:1]  # keep channel dim
@@ -77,7 +77,7 @@ def test_sample(test_loader):
     
     mean_time = times.mean().item()
     print("Inference time: {:.2f}ms, FPS: {:.2f} ".format(mean_time, 1000 / mean_time))
-
+    print(metric.count_all)
     metric_values = metric.get_metric()
     return metric_values
 
@@ -123,7 +123,7 @@ if __name__ == '__main__':
     
     elif 'CARDSetSmall' == args.dataset:
         print("Small preprocessed dataset")
-        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_small_dataset.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed)
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/train_small_dataset.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed)
 
     elif 'RSRD' == args.dataset:
         test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)

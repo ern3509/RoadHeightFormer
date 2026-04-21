@@ -1,6 +1,6 @@
 import torch, sys
 import torch.nn as nn
-from typing import List, Sequence, Tuple, Union
+from typing import List, Sequence, Tuple, Union, Optional
 from .DPT_utils import Permute
 from utils.experiment import save_feature_map
 from models.submodule import *
@@ -320,7 +320,7 @@ def custom_interpolate(
 
 def make_pca(out, name, feat_dim):
     C, H, W = out[0].shape
-    out_pca = out[0].cpu().detach().permute(1, 2, 0).reshape(-1, feat_dim)
+    out_pca = out[0].cpu().detach().permute(1, 2, 0).reshape(-1, C)
     
     print("out 2nd refinenet: ", out_pca.shape)
     pca = PCA(n_components=3)
@@ -395,7 +395,7 @@ class easy_transition_layer(nn.Module):
     def __init__(self,
         embed_dim: int,
         patch_size: int = 14,
-        out_channels: int | None = None,
+        out_channels: Optional[int] = None,
         intermediate_layer_idx=(0, 1, 2, 3),
     ):
         super().__init__()

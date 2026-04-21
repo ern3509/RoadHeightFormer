@@ -5,7 +5,6 @@ from typing import Union, Tuple, Optional, Callable
 import math
 import utils3d
 from utils.normals import normal_loss
-import lpips
 
 class MyLoss(nn.Module):
     def __init__(self, ele_range, voxel_ele_res, cla_res=1):
@@ -68,17 +67,19 @@ class LossReg(nn.Module):
             self.loss_func = lpips.LPIPS(net = "vgg")
             print("using perceptual loss")
         self.normalize = normalize
-        self.losstype = type_of_loss
-
 
     def forward(self, ele_pred, ele_gt, ele_mask):
         # ele_pred: [B, H, W]
         # ele_gt:   [B, H, W]
         # ele_mask: [B, H, W]
-        #print("Erwannnn",ele_pred.shape, ele_gt.shape, ele_mask.shape)
-        #print("ele_pred is nan", torch.sum(torch.isnan(ele_pred)))
-        ele_mask_roi = torch.logical_and(ele_gt > -self.ele_range, ele_gt < self.ele_range)
-        ele_mask = torch.logical_and(ele_mask_roi, ele_mask)
+
+        print("ele_gt max and min", ele_gt.max(), ele_gt.min(), ele_gt.mean())
+        # ele_mask_roi = torch.logical_and(ele_gt > -self.ele_range, ele_gt < self.ele_range)
+        # print("ele_mask_roi:" , ele_mask_roi.sum())
+        # print("ele_mask:" , ele_mask.sum())
+        # ele_mask = torch.logical_and(ele_mask_roi, ele_mask)
+        ele_mask = ele_mask.bool()
+        print("ele_mask:" , ele_mask.shape)
         ele_pred_masked = ele_pred[ele_mask]
         #print("Regression Loss:L1")
         #ele_pred = ele_pred[:, 0:1].squeeze(1)[ele_mask]
@@ -94,8 +95,8 @@ class LossReg(nn.Module):
             assert(gt_scaled.shape == ele_gt.shape)
             loss = self.loss_func(ele_pred_masked, gt_scaled)
         else:
-            print("total cell", total_cell)
-            print("mask", ele_mask.shape)
+            print("masked prediction", ele_pred_masked.shape)
+            print("mask", ele_gt_masked.shape)
 
             loss = self.loss_func(ele_pred_masked, ele_gt_masked) if self.loss_type == "L1" else self.loss_func(ele_pred, ele_gt, ele_mask, total_cell)
             loss = self.loss_func(ele_pred_masked, ele_gt_masked).mean(dim=0) if self.loss_type == "lpips" else loss
@@ -370,7 +371,7 @@ def align_points_scale_z_shift(points_src: torch.Tensor, points_tgt: torch.Tenso
     return scale, shift
 
 
-def scatter_min(size: int, dim: int, index: torch.LongTensor, src: torch.Tensor) -> torch.return_types.min:
+def scatter_min(size: int, dim: int, index: torch.LongTensor, src: torch.Tensor):
     "Scatter the minimum value along the given dimension of `input` into `src` at the indices specified in `index`."
     shape = src.shape[:dim] + (size,) + src.shape[dim + 1:]
     minimum = torch.full(shape, float('inf'), dtype=src.dtype, device=src.device).scatter_reduce(dim=dim, index=index, src=src, reduce='amin', include_self=False)

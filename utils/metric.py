@@ -2,7 +2,7 @@ import numpy as np
 from utils.experiment import make_nograd_func
 import torch
 import matplotlib.pyplot as plt
-from CARDSet.dataset import CARDSetDataset, CARDSetDatasetV2Smalldataset
+from cardset.dataset import CARDSetDataset, CARDSetDatasetV2Smalldataset
 
 class Metric():
     def __init__(self, ele_range, num_grids_z, distance_wise=False):
@@ -40,6 +40,7 @@ class Metric():
 
     @make_nograd_func
     def get_metric(self):
+        #import pdb; pdb.set_trace()
         metric_all = self.metric_all / self.count_all
         if self.distance_wise:
             metric_wise = self.metric_wise / self.count_wise.reshape(-1, 1)
@@ -109,23 +110,24 @@ class Metric():
         grad_err_y = torch.abs(grad_pred_y - grad_gt_y).mean()       # Gradient error in y-direction
         grad_err = (grad_err_x + grad_err_y) / 2 
         print("gradient_error", grad_err)
+    
         return np.array(torch.tensor([torch.mean(abs_err), rmse, ratio_thresh, abs_err_01, abs_err_1, le90, grad_err], device='cpu'))
 
 
     @make_nograd_func
     def compute(self, ele_pred, ele_gt, mask):
         # ele_pred: [B, H, W]
-        mask_roi = torch.logical_and(ele_gt > -self.ele_range, ele_gt < self.ele_range)
-        print("check the mask_roi",mask_roi.sum())
-        ele_mask = torch.logical_and(mask_roi, mask)
-        print("check the mask_roi",ele_mask.shape)
-        print("ele_gt", ele_gt.shape,ele_pred.shape)
-        print(ele_pred.min(), ele_pred.max())
-
+        # mask_roi = torch.logical_and(ele_gt > -self.ele_range, ele_gt < self.ele_range)
+        # print("check the mask_roi",mask_roi.sum())
+        # ele_mask = torch.logical_and(mask_roi, mask)
+        # print("check the mask_roi",ele_mask.shape)
+        # print("ele_gt", ele_gt.shape,ele_pred.shape)
+        # print(ele_pred.min(), ele_pred.max())
+        ele_mask = mask.bool()
         # Skip computation if ele_mask is zero
-        if ele_mask.sum() == 0:
-            print("Skipping computation due to zero ele_mask")
-            return
+        # if ele_mask.sum() == 0:
+        #     print("Skipping computation due to zero ele_mask")
+        #     return
 
         self.count_all += 1
         #self.metric_all += self.compute_values(ele_gt[ele_mask], ele_pred[ele_mask])

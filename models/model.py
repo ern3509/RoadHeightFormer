@@ -382,12 +382,12 @@ import torch
 import torch.nn as nn
 import torch.utils.data
 import torch.nn.functional as F
-from typing import List
+from typing import List, Optional
 from models.ele_head import *
 import math
 from .efficientnet import efficientnet_feature
 from utils.experiment import save_feature_map
-from .patch2feature import _make_scratch, _make_fusion_block, patch2feature, easy_transition_layer
+from .patch2feature import _make_scratch, _make_fusion_block, patch2feature, easy_transition_layer, make_pca
 import warnings
 import cv2
 from sklearn.decomposition import PCA
@@ -486,6 +486,8 @@ class Elevation(nn.Module):
             m.weight.data.normal_(0, math.sqrt(2. / n))
             if m.bias is not None:
                 m.bias.data.zero_()
+        # elif isinstance(m, torch.nn.BatchNorm2d):
+        #     m.eval()
 
     def forward(self, imgs_left, proj_index_left, *args):
         # proj_index: [num_samples, 2, num_grids_z*num_grids_x*num_grids_y]
@@ -497,11 +499,11 @@ class Elevation(nn.Module):
                 imgs_left = imgs_left.unsqueeze(1) # [B, 1, C, H, W] 
                 #imgs_left = imgs_left.transpose(-2, -1)
                 print("me", imgs_left.shape)
-                features, aux_features = self.feature_extraction(imgs_left)  #tuple of pair of feautures (patch embed and 1dfeature vector)
+                features, _ = self.feature_extraction(imgs_left)  #tuple of pair of feautures (patch embed and 1dfeature vector)
                 B, S, N, C = features[0][0].shape
                 print("Extracted features before projection shape:", features[0][0].shape)
                 features = [feat[0].reshape(B*S, N, C) for feat in features]
-
+                make_pca(features[-1].transpose(-1, -2).reshape(B*S, C, int(W/14), int(H/14)), "pca_before_projection.png", 768)
                 #print_types(features)
         
             if self.patch2feat:
@@ -559,7 +561,7 @@ class DinoV2SpatialDecoder(nn.Module):
         self,
         embed_dim: int,
         patch_size: int = 14,
-        out_channels: int | None = None,
+        out_channels: Optional[int] = None,
         intermediate_layer_idx=(0, 1, 2, 3),
     ):
         super().__init__()
