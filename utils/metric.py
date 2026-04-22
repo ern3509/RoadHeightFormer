@@ -115,19 +115,19 @@ class Metric():
 
 
     @make_nograd_func
-    def compute(self, ele_pred, ele_gt, mask):
+    def compute(self, ele_pred, ele_gt, ele_mask):
         # ele_pred: [B, H, W]
-        # mask_roi = torch.logical_and(ele_gt > -self.ele_range, ele_gt < self.ele_range)
+        mask_roi = torch.logical_and(ele_gt > -self.ele_range, ele_gt < self.ele_range)
         # print("check the mask_roi",mask_roi.sum())
-        # ele_mask = torch.logical_and(mask_roi, mask)
+        ele_mask = torch.logical_and(mask_roi, ele_mask)
         # print("check the mask_roi",ele_mask.shape)
         # print("ele_gt", ele_gt.shape,ele_pred.shape)
         # print(ele_pred.min(), ele_pred.max())
-        ele_mask = mask.bool()
+        ele_mask = ele_mask.bool()
         # Skip computation if ele_mask is zero
-        # if ele_mask.sum() == 0:
-        #     print("Skipping computation due to zero ele_mask")
-        #     return
+        if ele_mask.sum() == 0:
+            print("Skipping computation due to zero ele_mask")
+            return
 
         self.count_all += 1
         #self.metric_all += self.compute_values(ele_gt[ele_mask], ele_pred[ele_mask])

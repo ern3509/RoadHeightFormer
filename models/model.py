@@ -503,7 +503,7 @@ class Elevation(nn.Module):
                 B, S, N, C = features[0][0].shape
                 print("Extracted features before projection shape:", features[0][0].shape)
                 features = [feat[0].reshape(B*S, N, C) for feat in features]
-                make_pca(features[-1].transpose(-1, -2).reshape(B*S, C, int(W/14), int(H/14)), "pca_before_projection.png", 768)
+                #make_pca(features[-1].transpose(-1, -2).reshape(B*S, C, int(W/14), int(H/14)), "pca_before_projection.png", 768)
                 #print_types(features)
         
             if self.patch2feat:

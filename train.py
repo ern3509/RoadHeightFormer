@@ -28,7 +28,7 @@ from models.reprojection_loss import ReprojectionLoss
 
 
 
-os.environ['WANDB_MODE'] = 'online'
+os.environ['WANDB_MODE'] = 'disabled'
 
 now = datetime.now()
 
@@ -189,15 +189,14 @@ def train_regression():
                         ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
                     else:
                         ele_pred = model(imgs_left, proj_index_left)
-                    ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
 
                         #print("train ele pred shape:", ele_pred.shape)
                         
                     loss_all = loss_func(ele_pred, ele_gt, ele_mask)
 
                     #metric for evaluation
-                    # ele_mask_roi = torch.logical_and(ele_gt > -ele_range*100, ele_gt < ele_range*100)
-                    # eval_mask = torch.logical_and(ele_mask_roi, ele_mask.bool())
+                    ele_mask_roi = torch.logical_and(ele_gt > -ele_range*100, ele_gt < ele_range*100)
+                    eval_mask = torch.logical_and(ele_mask_roi, ele_mask.bool())
                     eval_mask = ele_mask.bool()
                     with torch.no_grad():
                         mae_l1 = torch.abs(ele_pred.detach()[eval_mask] - ele_gt[eval_mask]).mean()
@@ -220,8 +219,8 @@ def train_regression():
                 print("logging step:", global_step, args.summary_freq)
                 if global_step % args.summary_freq == 0: 
                     model.eval()
-                    # with torch.no_grad():
-                    #     ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
+                    with torch.no_grad():
+                        ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
                     
                     log_dict = {}
                     for s in range(len(fixed_train_indices)):
@@ -375,7 +374,6 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
                     #ele_pred = ele_pred[:, 0, :, :] #from B, 2, H, W to B, H, W
                     #ele_pred_fixed = ele_pred_fixed[:, 0, :, :]
                 
-                print("ele_mask: ", ele_mask)
                 if args.normalize:
                     print("undo normalization in testing")
                     h_min = - ele_range*100

@@ -60,7 +60,7 @@ class LossReg(nn.Module):
             self.loss_func = nn.L1Loss(reduction='mean')
             self.loss_type = "L1"
         elif type_of_loss == 'MSE':
-            self.loss_func = CustomMSELoss(reduction='mean')
+            self.loss_func = nn.MSELoss(reduction='mean')
             self.loss_type = "MSE"
         elif type_of_loss == "lpips":
             self.loss_type = "lpips"
@@ -74,10 +74,10 @@ class LossReg(nn.Module):
         # ele_mask: [B, H, W]
 
         print("ele_gt max and min", ele_gt.max(), ele_gt.min(), ele_gt.mean())
-        # ele_mask_roi = torch.logical_and(ele_gt > -self.ele_range, ele_gt < self.ele_range)
+        ele_mask_roi = torch.logical_and(ele_gt > -self.ele_range, ele_gt < self.ele_range)
         # print("ele_mask_roi:" , ele_mask_roi.sum())
         # print("ele_mask:" , ele_mask.sum())
-        # ele_mask = torch.logical_and(ele_mask_roi, ele_mask)
+        ele_mask = torch.logical_and(ele_mask_roi, ele_mask)
         ele_mask = ele_mask.bool()
         print("ele_mask:" , ele_mask.shape)
         ele_pred_masked = ele_pred[ele_mask]
@@ -98,9 +98,7 @@ class LossReg(nn.Module):
             print("masked prediction", ele_pred_masked.shape)
             print("mask", ele_gt_masked.shape)
 
-            loss = self.loss_func(ele_pred_masked, ele_gt_masked) if self.loss_type == "L1" else self.loss_func(ele_pred, ele_gt, ele_mask, total_cell)
-            loss = self.loss_func(ele_pred_masked, ele_gt_masked).mean(dim=0) if self.loss_type == "lpips" else loss
-            
+            loss = self.loss_func(ele_pred_masked, ele_gt_masked)
 
         return loss
     

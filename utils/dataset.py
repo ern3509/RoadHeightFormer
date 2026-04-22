@@ -27,7 +27,8 @@ class RSRD(Dataset):
             self.load_dataset_names('./filenames/train/')
             self.preprocessed_path = os.path.join(preprocessed_path, 'train')
         else:
-            self.load_dataset_names('./filenames/train/') #rechnage with test for testing on test set
+            # IDENTICAL TO TRAIN FOR DEBUG: loads same training data
+            self.load_dataset_names('./filenames/train/')
             self.preprocessed_path = os.path.join(preprocessed_path, 'train')
 
         #######################
