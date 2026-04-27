@@ -125,16 +125,16 @@ class EleReg2D(nn.Module):
     def forward(self, feat_voxel):
         # feat_voxel: [B, C, Z, X, Y]
         B = feat_voxel.shape[0]
-        print("EleReg2D: feat_voxel shape:", feat_voxel.shape)
+        #print("EleReg2D: feat_voxel shape:", feat_voxel.shape)
         feat_bev = feat_voxel.permute(0, 4, 1, 2, 3)
         feat_bev = feat_bev.reshape(
             B, self.channel_reshaped, self.num_grids_z, self.num_grids_x
         )
-        print("Range of feat_bev before first_conv:", feat_bev.min().item(), feat_bev.max().item())
+       # print("Range of feat_bev before first_conv:", feat_bev.min().item(), feat_bev.max().item())
         #save_feature_map(feat_bev[0, 0], "input_to_first_conv.png")
         feat_bev = self.first_conv(feat_bev)
-        print("Range of first_conv output:", feat_bev.min().item(), feat_bev.max().item())
-        print("check nan after first conv", torch.sum(torch.isnan(feat_bev)))
+        #print("Range of first_conv output:", feat_bev.min().item(), feat_bev.max().item())
+        #print("check nan after first conv", torch.sum(torch.isnan(feat_bev)))
         #save_feature_map(feat_bev[0, 0], "feat_bev_ele_reg2d")
         ele = self.reg_head(feat_bev)
         #save_feature_map(ele[0, 0], "ele_map_before_norm_ele_reg2d")

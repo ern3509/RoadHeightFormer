@@ -52,6 +52,9 @@ def test_sample(test_loader):
         vmin = torch.min(ele_gt[ele_mask>0]).item()
         vmax = torch.max(ele_gt[ele_mask>0]).item()
 
+        vmin = max(vmin, -ele_range*100)
+        vmax = min(vmax, ele_range*100)
+
         if args.normalize:
             h_min = - ele_range * 100
             h_max = ele_range * 100                        
@@ -63,13 +66,12 @@ def test_sample(test_loader):
            
 
         CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(pred.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Testimage/' + str(cur_time.item()) + '_pred', vmin= vmin, vmax=vmax)
-        CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Testimage/' + str(cur_time.item()) + '_gt' )
+        CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Testimage/' + str(cur_time.item()) + '_gt', vmin= vmin, vmax=vmax )
         
         ender.record()
         torch.cuda.synchronize()
         times[i] = starter.elapsed_time(ender)
 
-        print("predictione rwan", pred.shape)
         print(ele_gt.shape)
         metric.compute(pred, ele_gt, ele_mask)
         #with open('./bev_pred/' + cur_time[0] + '.pkl', 'wb') as f:
@@ -113,18 +115,18 @@ if __name__ == '__main__':
         print('Testing RoadBEV-mono!')
 
     # dataset, dataloader
-    if "CARDSet" == args.dataset:
+    if 'CARDSetV2Small' == args.dataset:
+        test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
+
+    elif 'CARDSetSmall' == args.dataset:
+        print("Small preprocessed dataset")
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_small_dataset.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed)
+
+    elif "CARDSet" == args.dataset:
         test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='test', down_scale=args.down_scale)
 
         #test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/RoadHeightFormer_test.txt', mode='test', down_scale=args.down_scale)
-
-    elif 'CARDSetV2Small' == args.dataset:
-        test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
     
-    elif 'CARDSetSmall' == args.dataset:
-        print("Small preprocessed dataset")
-        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/train_small_dataset.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed)
-
     elif 'RSRD' == args.dataset:
         test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
 

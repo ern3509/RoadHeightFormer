@@ -177,9 +177,9 @@ class LossReg2(nn.Module): #neg loglik + gradient loss
         self.ele_range = ele_range*100
         self.gradient_weight = gradient_weight
         if type_of_loss == 'L1':
-            self.loss_func = nn.L1Loss(reduction='mean')
+            self.l1loss = nn.L1Loss(reduction='mean')
         elif type_of_loss == 'MSE':
-            self.loss_func = CustomMSELoss(reduction='mean')
+            self.l1loss = nn.MSELoss(reduction='mean')
             
     def forward(self, ele_pred, ele_gt, ele_mask):
         # ele_pred: [B, 2, H, W]  mean and variance

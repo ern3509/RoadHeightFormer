@@ -521,7 +521,6 @@ class Elevation(nn.Module):
         features_left = features_left.reshape(B, C, -1)
         linear_indices = proj_index_left[:, 1, :] * W + proj_index_left[:, 0, :]
 
-       #print("linear indices:" ,linear_indices.shape)
         voxel_feat_left = features_left.gather(dim=2, index=linear_indices.unsqueeze(1).expand(-1, C, -1))
         #print("voxel feet after gather shape:", voxel_feat_left.shape)
 

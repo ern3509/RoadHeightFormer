@@ -134,7 +134,7 @@ class patch2feature(nn.Module):
         l3_rn = self.scratch.layer3_rn(l3)
        #print("valid elements L3 after the conv", torch.sum(torch.isnan(l3_rn)), torch.sum(torch.isinf(l3_rn)))
         l4_rn = self.scratch.layer4_rn(l4)
-        print(l4_rn.shape)
+        #print(l4_rn.shape)
        # make_pca(l4_rn, "l4_rn_pca.png", 128)
         #visualize_value(l4_rn, "l4_rn_feat.png")
         l1_rn = self.rn_norm[0](self.scratch.layer1_rn(l1))
@@ -144,24 +144,24 @@ class patch2feature(nn.Module):
         # 4 -> 3 -> 2 -> 1
         out = self.scratch.refinenet4(l4_rn, size=l3_rn.shape[2:])
         out = self.fuse_norm[0](out)
-        print("out 1st refinenet: ", out.shape)
-        stat(out, "l4_rn")
+       # print("out 1st refinenet: ", out.shape)
+        #stat(out, "l4_rn")
        #print("valid elements after the conv", torch.sum(torch.isnan(out)), torch.sum(torch.isinf(out)))
         #visualize_value(out, "l4_out.png")
         out = self.scratch.refinenet3(out, l3_rn, size=l2_rn.shape[2:])
         out = self.fuse_norm[1](out)
-        stat(out, "l3_rn")
+        #stat(out, "l3_rn")
 
         out = self.scratch.refinenet2(out, l2_rn, size=l1_rn.shape[2:])
         out = self.fuse_norm[2](out)
-        print("out 3rd refinenet: ", out.shape)
+        #print("out 3rd refinenet: ", out.shape)
         #visualize_value(out, "l2_out.png")
-        stat(out, "l2_rn")
+        #stat(out, "l2_rn")
         #visualize_value(out, "l3_out.png")
        #print("valid elements after the conv", torch.sum(torch.isnan(out)), torch.sum(torch.isinf(out)))
         out = self.scratch.refinenet1(out, l1_rn)
         out = self.fuse_norm[3](out)
-        stat(out, "l1_rn")
+        #stat(out, "l1_rn")
         return out
     
     def forward(self, feats: List[torch.Tensor],
@@ -170,20 +170,20 @@ class patch2feature(nn.Module):
                 h_out,
                 w_out,
                 patch_start_idx: int = 0) -> torch.Tensor:
-        print("len feats", len(feats))
-        print("featshape", feats[0].shape)
+        #print("len feats", len(feats))
+        #print("featshape", feats[0].shape)
         B, _, C = feats[0].shape
         ph, pw = H // self.patch_size, W // self.patch_size
         resized_feats = []
-        print("##################start feature upsampling and fusion")
+        #print("##################start feature upsampling and fusion")
         for stage_idx, take_idx in enumerate(self.intermediate_layer_idx):
             x = feats[take_idx][:, patch_start_idx:]  # [B*S, N_patch, C]
 
             x = self.norm(x)
-            print("entry shape: ", x.shape)
+            #print("entry shape: ", x.shape)
             x = x.permute(0, 2, 1).reshape(B, C, ph, pw)  # [B*S, C, ph, pw] C=768
             #make_pca(x, "dinov2features.png", C)
-            print("xshape", x.shape)
+            #print("xshape", x.shape)
            #print("valid input data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
             x = self.projects[stage_idx](x)  # [B*S, C, ph, pw] C here is 48, 96, 192, 384
             if self.pos_embed:
@@ -191,7 +191,7 @@ class patch2feature(nn.Module):
            #print("valid input projected data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
 
             x = self.resize_layers[stage_idx](x)  # Align scale
-            print("reshaped input: ", x.shape)
+            #print("reshaped input: ", x.shape)
 
            #print("valid resized input data", torch.sum(torch.isnan(x)), torch.sum(torch.isinf(x)))
             #visualize_value(x, f"projected_and_resized{stage_idx}.png")
@@ -204,13 +204,13 @@ class patch2feature(nn.Module):
         #make_pca(fused, "fused_pca.png", 128)
        #print("valid fused data before interpolation", torch.sum(torch.isnan(fused)), torch.sum(torch.isinf(fused)))
         #visualize_value(fused, "fuse_before_outconv.png")
-        print("fused shape: ", fused.shape)
+        #print("fused shape: ", fused.shape)
         fused = self.scratch.output_conv1(fused)
        #print("valid fused data", torch.sum(torch.isnan(fused)), torch.sum(torch.isinf(fused)))
         # Get index of largest value
         #visualize_value(fused, "fused_beforeinterpolation.png")
         fused = custom_interpolate(fused, (h_out, w_out), mode="bilinear", align_corners=True)
-        print("fused shape before interpolation: ", fused.shape)
+        #print("fused shape before interpolation: ", fused.shape)
 
        #print("valid interpolate fused data", torch.sum(torch.isnan(fused)), torch.sum(torch.isinf(fused)))
         #visualize_value(fused, "fused_afterinterpolation.png")

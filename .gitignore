@@ -14,6 +14,6 @@ RSRD_dev_toolkit-main
 RSRD_ang
 preprocessed.zip
 checkpoints/
-CARDSet/
 models/RoabBEV-mono.ckpt
 *.png
+*.pkl

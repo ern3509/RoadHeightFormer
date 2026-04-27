@@ -67,9 +67,9 @@ def normal_loss(pred_height, gt_height, hori_centers, mask=None):
         # number of valid pixels per sample
         valid = mask.sum(dim=(1, 2)).clamp(min=1.0)
 
-        # mean loss per sample
-        loss_per_sample = loss.sum(dim=(1, 2)) #/ valid
-        print("loss per sample: ", loss_per_sample)
+        # mean loss per sample (normalize by valid count)
+        loss_per_sample = (loss * mask).sum(dim=(1, 2)) / valid
+        
 
     else:
         loss_per_sample = loss.mean(dim=(1, 2))

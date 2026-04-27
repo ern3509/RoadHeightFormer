@@ -101,15 +101,19 @@ class Metric():
         # Linear Error (LE90%)
         le90 = torch.quantile(abs_err, 0.9)  # 90th percentile of absolute error
 
-        # Gradient Error todo: apply mask on it
-        grad_pred_x = torch.abs(ele_pred[:, 1:] - ele_pred[:, :-1])  # Gradient in x-direction
-        grad_pred_y = torch.abs(ele_pred[1:, :] - ele_pred[:-1, :])  # Gradient in y-direction
-        grad_gt_x = torch.abs(ele_gt[:, 1:] - ele_gt[:, :-1])        # Gradient in x-direction
-        grad_gt_y = torch.abs(ele_gt[1:, :] - ele_gt[:-1, :])        # Gradient in y-direction
-        grad_err_x = torch.abs(grad_pred_x - grad_gt_x).mean()       # Gradient error in x-direction
-        grad_err_y = torch.abs(grad_pred_y - grad_gt_y).mean()       # Gradient error in y-direction
-        grad_err = (grad_err_x + grad_err_y) / 2 
-        print("gradient_error", grad_err)
+        # Gradient Error - must respect mask to avoid spurious boundary gradients
+        # Mask for valid gradient pairs: both neighbors must be valid
+        mask_gx = ele_mask[:, 1:] & ele_mask[:, :-1]
+        mask_gy = ele_mask[1:, :] & ele_mask[:-1, :]
+
+        grad_pred_x = ele_pred[:, 1:] - ele_pred[:, :-1]
+        grad_pred_y = ele_pred[1:, :] - ele_pred[:-1, :]
+        grad_gt_x = ele_gt[:, 1:] - ele_gt[:, :-1]
+        grad_gt_y = ele_gt[1:, :] - ele_gt[:-1, :]
+
+        grad_err_x = torch.abs(grad_pred_x - grad_gt_x)[mask_gx].mean() if mask_gx.any() else torch.tensor(0.0)
+        grad_err_y = torch.abs(grad_pred_y - grad_gt_y)[mask_gy].mean() if mask_gy.any() else torch.tensor(0.0)
+        grad_err = (grad_err_x + grad_err_y) / 2
     
         return np.array(torch.tensor([torch.mean(abs_err), rmse, ratio_thresh, abs_err_01, abs_err_1, le90, grad_err], device='cpu'))
 

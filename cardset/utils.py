@@ -2,24 +2,27 @@ import torch
 import numpy as np
 import cv2, random
 from typing import Tuple
-def _apply_flip(imgs_left, intrinsic, voxel_uv_left, ele_gt, mask):
+
+def _apply_flip(imgs_left, intrinsic, voxel_uv_left, ele_gt, mask, down_scale=4):
     """
     Horizontally flip the image and adjust related parameters.
     
     Args:
         imgs_left: torch.Tensor, shape (C, H, W), normalized to [0, 1]
         intrinsic: torch.Tensor, shape (3, 3), camera intrinsic matrix
-        voxel_uv_left: torch.Tensor, shape (N, 2), UV coordinates (long/int type)
+        voxel_uv_left: torch.Tensor, shape (N, 2), UV coordinates (long/int type) in feature map space
         ele_gt: torch.Tensor, shape (Z, X), elevation ground truth (float32)
         mask: torch.Tensor, shape (Z, X), valid region mask (int8)
+        down_scale: int, downscale factor between image and feature map (voxel UVs are in feature map space)
     
     Returns:
         imgs_left_flipped, intrinsic_flipped, voxel_uv_flipped, ele_gt_flipped, mask_flipped
         (all torch.Tensor with same dtype as input)
     """
-    print("voxel_uv_left before flip:", voxel_uv_left.shape)
     # Get image dimensions (C, H, W) format
     _, height, width = imgs_left.shape
+    # Voxel UVs are in feature map space (image_size // down_scale)
+    feat_width = width // down_scale
     
     # Flip image along width axis (axis=2)
     imgs_left_flipped = torch.flip(imgs_left, dims=[2])
@@ -28,9 +31,9 @@ def _apply_flip(imgs_left, intrinsic, voxel_uv_left, ele_gt, mask):
     intrinsic_flipped = intrinsic.clone()
     intrinsic_flipped[0, 2] = width - intrinsic[0, 2]  # cx becomes width - cx
     
-    # Flip voxel UV coordinates - flip x-coordinate (u-coordinate)
+    # Flip voxel UV coordinates - flip x-coordinate in feature map space
     voxel_uv_flipped = voxel_uv_left.clone()
-    voxel_uv_flipped[0] = width - 1 - voxel_uv_left[0]  # u = width - u
+    voxel_uv_flipped[0] = feat_width - 1 - voxel_uv_left[0]
     
     # Flip ground truth elevation map and mask along width axis (axis=1)
     ele_gt_flipped = torch.flip(ele_gt, dims=[-1])
@@ -118,3 +121,51 @@ def apply_gt_cutout(ele_gt: torch.Tensor,
         mask_out[r : r + ph, c : c + pw] = 0
 
     return ele_gt, mask_out
+
+import numpy as np
+
+
+def npz_to_ply(npz_path, ply_path, points_key=None):
+    """
+    Convert a point cloud stored in an NPZ file to a PLY file.
+
+    Parameters
+    ----------
+    npz_path : str
+        Path to input .npz file.
+    ply_path : str
+        Path to output .ply file.
+    points_key : str, optional
+        Key containing the point cloud inside the npz file.
+        If None, the first array will be used.
+    """
+
+    # Load npz
+    data = np.load(npz_path)
+
+    # Select array
+    if points_key is None:
+        points = data[list(data.keys())[0]]
+    else:
+        points = data[points_key]
+
+    # Validate shape
+    if points.shape[1] < 3:
+        raise ValueError("Point cloud must have at least XYZ coordinates")
+
+    xyz = points[:, :3]
+
+    # Write PLY
+    with open(ply_path, "w") as f:
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write(f"element vertex {len(xyz)}\n")
+        f.write("property float x\n")
+        f.write("property float y\n")
+        f.write("property float z\n")
+        f.write("end_header\n")
+
+        for p in xyz:
+            f.write(f"{p[0]} {p[1]} {p[2]}\n")
+
+    print(f"Saved PLY file: {ply_path}")

@@ -153,7 +153,7 @@ class RSRD(Dataset):
         print(points_y.mean())
         points_xz = xyz[:, [0, 2]]
         grids_y = torch.zeros((self.num_grids_z, self.num_grids_x), dtype=torch.float32)
-        grids_count = torch.zeros((self.num_grids_z, self.num_grids_x), dtype=torch.int8)
+        grids_count = torch.zeros((self.num_grids_z, self.num_grids_x), dtype=torch.int32)  # int8 overflows at 127 with dense point clouds
 
         for xz, y in zip(points_xz, points_y):
             idx_x = torch.clip(((xz[0] - self.roi_x[0]) / self.grid_res[0]).int(), max=self.num_grids_x-1)

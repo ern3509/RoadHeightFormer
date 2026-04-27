@@ -11,6 +11,7 @@ from tqdm import tqdm
 from utils.dataset import RSRD
 from torch.cuda.amp import GradScaler
 from models.loss import MyLoss, LossReg, LossReg2, affine_invariant_global_loss, MSE_normal_loss
+from models.structural_losses import CompositeLoss
 from torch.utils.data import DataLoader
 from models.model import Elevation
 import pickle
@@ -26,9 +27,11 @@ import time
 import matplotlib.pyplot as plt
 from models.reprojection_loss import ReprojectionLoss
 
+from utils.config import parse_args_with_config
 
 
-os.environ['WANDB_MODE'] = 'disabled'
+
+os.environ['WANDB_MODE'] = 'online'
 
 now = datetime.now()
 
@@ -196,8 +199,8 @@ def train_regression():
 
                     #metric for evaluation
                     ele_mask_roi = torch.logical_and(ele_gt > -ele_range*100, ele_gt < ele_range*100)
-                    eval_mask = torch.logical_and(ele_mask_roi, ele_mask.bool())
-                    eval_mask = ele_mask.bool()
+                    eval_mask = torch.logical_and(ele_mask_roi, ele_mask)
+                    eval_mask = eval_mask.bool()
                     with torch.no_grad():
                         mae_l1 = torch.abs(ele_pred.detach()[eval_mask] - ele_gt[eval_mask]).mean()
                     
@@ -214,7 +217,6 @@ def train_regression():
                         ele_pred_fixed = unnormalize(ele_pred_fixed, h_min, h_max)
                         print("max and min after normalization:", ele_pred_fixed.max().item(), ele_pred_fixed.min().item())
 
-            
             #/****logging ***********************
                 print("logging step:", global_step, args.summary_freq)
                 if global_step % args.summary_freq == 0: 
@@ -253,10 +255,16 @@ def train_regression():
                 scaler.step(optimizer)
                 scaler.update()
 
+                # Scheduler step AFTER optimizer step
+                if args.regression and args.scheduler == 'reduceonplateau':
+                    scheduler.step(loss_all.data.item())
+                else:
+                    scheduler.step()
+
                 wandb.log({"train/lr": scheduler.get_last_lr()[0]}, step = global_step)
                 wandb.log({"train/mae": mae_l1.item()}, step=global_step)
                 epoch_active_time = time.time() - start_time
-                loss_wandb = loss_all.data.detach().item()
+                loss_wandb = loss_all.detach().item()
 
                 if np.isnan(loss_wandb):
                     print('nan loss!')
@@ -264,6 +272,11 @@ def train_regression():
                     exit()
                 print("loss has been logged")
                 wandb.log({"loss": loss_wandb}, step = global_step)
+
+                # Log per-component losses if using CompositeLoss
+                if hasattr(loss_func, '_last_components'):
+                    for k, v in loss_func._last_components.items():
+                        wandb.log({f"loss/{k}": v}, step=global_step)
 
                 info = 'train--> epoch%2d, lr:%.6f, loss:%.4f' % (epoch_idx+1, optimizer.param_groups[0]['lr'], loss_wandb)
                 print(info)
@@ -307,10 +320,7 @@ def train_regression():
             # if early_stopping.should_stop:
             #     print("Early stopping triggered!")
             #     break
-        if args.regression and args.scheduler == 'reduceonplateau':
-            scheduler.step(loss_all.data.item())
-        else:
-            scheduler.step()
+
         time_epoch_end = time.time() - time_epoch
         wandb.log({"epoch/epoch_duration": time_epoch_end}, step=global_step)
         wandb.log({"epoch/epoch": epoch_idx+1}, step=global_step)
@@ -384,7 +394,8 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
                 #ele_mask = torch.logical_and(roi_mask, ele_mask)
 
                 abs_error = (torch.abs(ele_pred - ele_gt)) * ele_mask
-                abs_error = abs_error.mean()
+                valid_count = ele_mask.sum().clamp(min=1)
+                abs_error = abs_error.sum() / valid_count  # divide by valid pixels, not total
                 total_error += abs_error.item()
                 total_valid_pixels += ele_mask.sum().item()
 
@@ -451,10 +462,6 @@ def train():
                     else:
                         ele_pred = model(imgs_left, proj_index_left)
                         print("train ele pred shape:", ele_pred.shape)
-                        model.eval()
-                        with torch.no_grad():
-                            ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
-                        model.train()
                     loss_all = loss_func(ele_pred, ele_gt, ele_mask)
                     #metric for evaluation
                     ele_mask_roi = torch.logical_and(ele_gt > -ele_range, ele_gt < ele_range)
@@ -471,6 +478,9 @@ def train():
                 print("logging step:", global_step, args.summary_freq)
                 if global_step % args.summary_freq == 0: 
                     log_dict = {}
+                    model.eval()
+                    with torch.no_grad():
+                        ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
                     for s in range(len(fixed_train_indices)):
                         if not logged_train_static:
                             gt_np = np.ma.masked_where(
@@ -492,9 +502,10 @@ def train():
                         vmax=gt_vmax[s],
                         )
                         wandb.log({"train/combined_sample_" + str(s): combined_img}, step=global_step)
+                    model.train()
 
                     logged_train_static = True
-                    wandb.log(log_dict, step=global_step)
+                    #wandb.log(log_dict, step=global_step)
                 scaler.scale(loss_all).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -614,19 +625,19 @@ def test_sample(test_loader, global_step, run, logged_eval_static=False):
             #ele_pred = torch.tensor(ele_pred.unsqueeze(dim=0))
 
             abs_error = torch.abs(
-                ele_pred[ele_mask] - ele_gt[ele_mask]
-            ).sum()
+                ele_pred - ele_gt
+            ) * ele_mask
 
+            valid_count = ele_mask.sum().clamp(min=1)
+            abs_error = abs_error.sum() / valid_count  # divide by valid pixels, not total
             total_error += abs_error.item()
             total_valid_pixels += ele_mask.sum().item()
 
 
-    eval_loss = total_error / total_valid_pixels
-
+    model.train()
     metric_values = metric.get_metric()
     metric.clear()
-
-    model.train()
+    eval_loss = total_error/len(test_loader) 
 
     return metric_values, eval_loss
 
@@ -796,7 +807,6 @@ def wandb_rgb_image(img, caption):
     return wandb.Image(img, caption=caption)
 
 def get_fixed_samples(dataset, indices, device):
-    print("len of dataset:", len(dataset))
     samples = [dataset[i] for i in indices]
     print("fetch from visual")
     imgs = torch.stack([s[0] for s in samples]).to(device)
@@ -911,6 +921,10 @@ if __name__ == '__main__':
     parser.add_argument('--dino', default="small", help='ViT encoder size')
 
     # parse arguments, set seeds
+    # args = parse_args_with_config()
+    # print(f"DEBUG: Config file: {args.config}")
+    # print(f"DEBUG: Dataset: {args.dataset}")
+    # print(f"DEBUG: Batch size: {args.batch_size}")
     args = parser.parse_args()
     torch.backends.cudnn.enable = True
     torch.backends.cudnn.benchmark = True
@@ -936,11 +950,12 @@ if __name__ == '__main__':
     elif 'CARDSetV2Small' in args.dataset:
         test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
         train_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
+        # Batch size and summary_freq now come from config file, not hardcoded here
         args.batch_size = 1
         args.summary_freq = 1
-        #args.epochs = 20
+        args.epochs = 20
     elif 'CARDSetSmall' in args.dataset:
-        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/train_small_dataset.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = True)
+        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/train_small_dataset.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = True) #args.augmentation)
         test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_small_dataset.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = False)
 
 
@@ -952,17 +967,18 @@ if __name__ == '__main__':
         print('unknown dataset!')
         exit(0)
 
+
     # IDENTICAL LOADERS FOR DEBUG: both use same data, batch size, and workers
-    train_loader = DataLoader(train_set, args.batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=True)
+    train_loader = DataLoader(train_set, args.batch_size, shuffle=False, num_workers=8, drop_last=True, pin_memory=True)
     
     #test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='test', down_scale=args.down_scale)
     # For identical setup: same batch_size and num_workers as train_loader
     test_loader = DataLoader(test_set, 1, shuffle=False, num_workers=8, drop_last=False, pin_memory=True)
-    print('dataset size - train:%d, test:%d' % (len(train_set), len(test_set)))
+    print('dataset size - train:%d, test:%d' % (len(train_loader), len(test_loader)))
 
     #get fixed sample for logging
-    fixed_train_indices = [0, 1, 2]  
-    fixed_eval_indices  = [0, 1, 2]#,6,7]
+    fixed_train_indices = [0]#, 1, 2]  
+    fixed_eval_indices  = [0]#, 1, 2]#,6,7]
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -1002,6 +1018,16 @@ if __name__ == '__main__':
             loss_func = LossReg(ele_range, args.normalize, 'MSE').cuda()
         elif args.loss == 'lpips':
             loss_func = LossReg(ele_range, args.normalize, 'lpips').cuda()
+        elif args.loss == 'composite':
+            loss_func = CompositeLoss(
+                ele_range, hori_centers=hori_centers, normalize=args.normalize,
+                pixel_type='L2',
+                w_pixel=0.3,      # primary supervision
+                w_gradient=1.0,   # Step 1: gradient is the key addition
+                w_structure=0.0,  # Step 3: enable at 0.5
+                w_normal=1,     # Step 4: enable at 0.1
+                w_smoothness=0.0, # Step 2: enable at 0.1
+            ).cuda()
         else:
             loss_func = MSE_normal_loss(ele_range, hori_centers=hori_centers, normalize=args.normalize).cuda()
     else:

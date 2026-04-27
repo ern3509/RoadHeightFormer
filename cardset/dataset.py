@@ -16,7 +16,7 @@ import PIL
 import argparse
 from torch.utils.data import random_split
 from torch.utils.data import Subset
-from cardset.utils import _apply_flip, apply_gaussian_noise_and_blur, apply_gt_cutout #, apply_rotation_augmentation, apply_color_jitter
+from cardset.utils import _apply_flip, apply_gaussian_noise_and_blur, apply_gt_cutout, npz_to_ply #, apply_rotation_augmentation, apply_color_jitter
 import pickle, gzip, random
 
 
@@ -102,96 +102,24 @@ class CARDSetDataset(Dataset):
         with open(self.split_file, "r") as f:
             self.images_names = [line.strip() for line in f if line.strip()]
             
-        self.pairs = self.create_image_depth_pairs(self.images_names)
-
+        self.pairs = self.create_image_depth_pairs(self.images_names)            
         
-
         #self.make_pairs()
         
         if mode == 'train': 
-            self.pairs = self.pairs#10250:]
+            self.pairs = self.pairs[:1]#10250:]
         else:
             self.pairs = self.pairs #[:20] #[4175:] #self.pairs[15754:15754+30]
 
         self.preprocessed_data = preprocessed_data
-        # Filter out pairs with empty point clouds
-        #self.pairs = self.filter_pairs_with_points(self.pairs)
 
-        #self.train_pairs = self.pairs[:length*70//100]
-        #select everey 5th pair fo rtraining
-        #new_indices = self.train_pairs.indices[::5]
-        #self.train_pairs = Subset(self.train_pairs.dataset, new_indices)
-        #self.test_pairs = self.pairs[length*70//100:]
-        #new_indices = self.test_pairs.indices[::50]
-        #self.test_pairs = Subset(self.train_pairs.dataset, new_indices)
-        #self.test_pairs = self.test_pairs[::15]
         
         self.transform_jpg = transforms.Compose([
             transforms.ToTensor(),  # image --> [0, 1]
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # [0, 1] --> [-1, 1]
         ])
     
-    # def __init__(self, 
-    #              root_dir: str,
-    #              mode: str = 'train',
-    #              down_scale = 4):
-    #     super().__init__()
-    #     self.root_dir = root_dir
-    #     self.mode = mode
-        
-
-    #     self.img_dir = os.path.join(root_dir, 'img', 'cam_1')
-    #     self.depth_dir = os.path.join(root_dir, 'agg_depth', 'cam_1')
-    #     self.image_files = sorted(os.listdir(self.img_dir), key=lambda x: (len(x), x))
-    #     self.depth_files = sorted(os.listdir(self.depth_dir), key=lambda x: (len(x), x))
-
-    #     self.down_scale = down_scale
-
-    #     self.base_height = 1.857  # in meter, the reference height of the camera w.r.t. road surface
-    #     self.y_range = 0.2  # in meter, the range of interest above and below the base height， i.e., [-20cm, 20cm]
-    #     self.roi_x = torch.tensor([-1, 0.92])    # in meter, the lateral range of interest (in the horizontal coordinate of camera)
-    #     self.roi_z = torch.tensor([5.16, 10.08])    # in meter, the longitudinal range of interest
-
-    #     self.grid_res = torch.tensor([0.03, 0.01, 0.03])  # in [x, y(vertical), z] order. The range of interest above should be integer times of resolution here
-        
-
-    #     self.num_grids_x = int((self.roi_x[1] - self.roi_x[0]) / self.grid_res[0])
-    #     self.num_grids_z = int((self.roi_z[1] - self.roi_z[0]) / self.grid_res[2])
-    #     self.num_grids_y = int(self.y_range*2 / self.grid_res[1])
-
-    #     len_images = len(self.image_files)
-    #     len_depths = len(self.depth_files)
-    #     assert len_images == len_depths, f"The number of images and depth files should be the same.{len_images} != {len_depths}"
-    #     if(mode not in ['train', 'test']):
-    #         raise ValueError("mode should be either 'train' or 'test'")
-        
-    #     elif mode == 'train':
-            
-    #         self.image_files = self.image_files[:len_images*7//10]
-    #         self.depth_files = self.depth_files[:len_images*7//10]
-    #     else:
-    #         self.image_files = self.image_files[len_images*7//10:]
-    #         self.depth_files = self.depth_files[len_images*7//10:]
-
-    #     # generate the centers of every horizontal grid
-    #     hori_centers = torch.zeros((self.num_grids_z, self.num_grids_x, 2), dtype=torch.float32)
-    #     hori_centers[:, :, 0] = (torch.arange(self.num_grids_x) * self.grid_res[0] + self.roi_x[0] + self.grid_res[0]/2).unsqueeze(0).repeat([self.num_grids_z, 1])
-    #     hori_centers[:, :, 1] = (-torch.arange(self.num_grids_z) * self.grid_res[2] + self.roi_z[1] - self.grid_res[2]/2).unsqueeze(1).repeat([1, self.num_grids_x])
-    #     self.map_centers = hori_centers.reshape(-1, 2)
-    #     self.num_center = self.map_centers.shape[0]
-
-    #     # generate the centers of every 3D voxel
-    #     voxel_centers = torch.zeros((self.num_grids_z, self.num_grids_x, self.num_grids_y, 3), dtype=torch.float32)
-    #     voxel_centers[:, :, :, [0, 2]] = hori_centers.unsqueeze(2).repeat([1, 1, self.num_grids_y, 1])
-    #     voxel_centers[:, :, :, 1] = (torch.arange(self.num_grids_y) * self.grid_res[1] + self.base_height - self.y_range + self.grid_res[1]/2).unsqueeze(0).unsqueeze(0).repeat([self.num_grids_z, self.num_grids_x, 1])
-    #     self.voxel_centers = voxel_centers.reshape(-1, 3).transpose(1, 0)
-    #     print(fr"voxel_centers shape{voxel_centers.shape}")
-        
-    #     self.transform_jpg = transforms.Compose([
-    #         transforms.ToTensor(),  # image --> [0, 1]
-    #         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # [0, 1] --> [-1, 1]
-    #     ])
-
+   
     def filter_pairs_with_points(self, pairs):
         """
         Filter out pairs where the cropped point cloud is empty.
@@ -337,28 +265,38 @@ class CARDSetDataset(Dataset):
             z = 0
         return np.array([x, y, z], dtype=np.float32)
 
-    def crop_image (self, K, image):
-        print("test:", image.size)
-        x = image
-        W, H = image.size
-        w_c = 952
-        h_c = 532
-        u_0 = (W - w_c) / 2
-        v_0 = (H - h_c) / 2
-        u_1 = (W + w_c) / 2
-        v_1 = (H + h_c) / 2
-        #imgs_left = image.crop((u_0, v_0, u_1, v_1))
-        imgs_left = image.resize((w_c, h_c))
-        scale_x = W/w_c
-        scale_y = H/h_c
-        intrinsic = K
-        intrinsic[0:2] = intrinsic[0:2] / scale_x  #cx
-        intrinsic[1:2] = intrinsic[1:2] / scale_y  #cy
-        intrinsic[0:0] = intrinsic[0:0] / scale_x  #fx
-        intrinsic[1:1] = intrinsic[1:1] / scale_y  #fy
-       
 
-        return imgs_left, intrinsic 
+        # # Extract crop parameters
+        # left, top, right, bottom = crop_box
+        # cropped_image = image.crop(crop_box)
+        # # Copy intrinsics and adjust principal point
+        # K_new = K.clone()
+        # K_new[0, 2] -= left   # cx_new = cx_old - left
+        # K_new[1, 2] -= top
+    def crop_image (self, K, image, crop_box=None):
+        """
+        Resize image and adjust camera intrinsics accordingly.
+        Note: This function resizes, not crops (despite the name).
+        """
+        W, H = image.size  # Original dimensions
+        w_c, h_c = 952, 532  # Target dimensions
+
+        # Resize image
+        resized_image = image.resize((w_c, h_c))
+
+        # Calculate scale factors (new_size / old_size)
+        scale_x = w_c / W
+        scale_y = h_c / H
+
+        # Adjust intrinsics for resize
+        K_new = K.clone()
+        K_new[0, 0] *= scale_x  # fx
+        K_new[1, 1] *= scale_y  # fy
+        K_new[0, 2] *= scale_x  # cx
+        K_new[1, 2] *= scale_y  # cy
+
+        return resized_image, K_new 
+    
     def get_preprocessed_data(self, path):
         with gzip.open(path, "rb") as f:
             data = pickle.load(f)
@@ -371,9 +309,12 @@ class CARDSetDataset(Dataset):
         #use the preprocessed data
         if self.preprocessed_data:
             if self.mode == 'train':
-                preprocesed_path = os.path.join("/data/rhf/train_preprocessed_small_data", f"data_item_{idx:06d}.pkl.gz")
-            else :
-                preprocesed_path = os.path.join("/data/rhf/val_preprocessed_small_data", f"data_item_{idx:06d}.pkl.gz")
+                # Use configurable preprocessed data directory
+                preprocessed_dir = getattr(self, 'preprocessed_dir', "/data/rhf/train_preprocessed_small_data")
+                preprocesed_path = os.path.join(preprocessed_dir, f"data_item_{idx:06d}.pkl.gz")
+            else:
+                preprocessed_dir = getattr(self, 'preprocessed_dir', "/data/rhf/val_preprocessed_small_data")
+                preprocesed_path = os.path.join(preprocessed_dir, f"data_item_{idx:06d}.pkl.gz")
 
             data = self.get_preprocessed_data(preprocesed_path)
 
@@ -383,19 +324,22 @@ class CARDSetDataset(Dataset):
             timestamp =  data['timestamp_us']
             intrinsic = torch.tensor(data['intrinsics'], dtype=torch.float32)
             img_left = Image.open(data['path'])
-            img_left, intrinsic = self.crop_image(intrinsic, img_left)
+
+            #crop to region of interest
+            crop_box = (604, 1124, 1696, 1642)
+            img_left, intrinsic = self.crop_image(intrinsic, img_left, crop_box)
             x = transforms.ToTensor()(img_left)
-            print(x.min(), x.max())
-            print(x.mean(), x.std())
-            print(x.shape)
+            # print(x.min(), x.max())
+            # print(x.mean(), x.std())
+            # print(x.shape)
         
 
             x = x.cpu().permute(1, 2, 0).numpy()
             x = (x * 255.0).clip(0, 255).astype("uint8")
             image_cropped = cv2.cvtColor(x, cv2.COLOR_RGB2BGR)
-            cv2.imwrite("imageyou.png", image_cropped)
+            #cv2.imwrite("imageyou.png", image_cropped)
             imgs_left = self.transform_jpg(img_left)
-            print(data['path'])
+            #print(data['path'])
             #*_, labels = self.get_cam_payload(data['path'])
             #get the region of interest in BEV space
             #u1, v1, u2, v2 = labels["bbox"]
@@ -422,28 +366,30 @@ class CARDSetDataset(Dataset):
                 #             angles_range  = (0.03, 0.03, 0.03),
                 #         )
                 imgs_left = transforms.ToTensor()(img_left)
-                
                 if a < 0.5:
-                    imgs_left, intrinsic, voxel_uv_left, ele_gt, mask = \
-                        _apply_flip(imgs_left, intrinsic,
-                                        voxel_uv_left, ele_gt, mask)
-                    
+                    if random.random() < 0.5:
+                        imgs_left, intrinsic, voxel_uv_left, ele_gt, mask = \
+                            _apply_flip(imgs_left, intrinsic,
+                                            voxel_uv_left, ele_gt, mask,
+                                            down_scale=self.down_scale)
 
-                if a < 0.5:
-                    None #imgs_left = apply_color_jitter(imgs_left)
-                imgs_left = apply_gaussian_noise_and_blur(imgs_left)
+                    if random.random() < 0.5:
+                        None #imgs_left = apply_color_jitter(imgs_left)
+                    imgs_left = apply_gaussian_noise_and_blur(imgs_left)
 
-                if a < 0.5:
-                    ele_gt, mask = apply_gt_cutout(ele_gt, mask)
+                    if random.random() < 0.5:
+                        ele_gt, mask = apply_gt_cutout(ele_gt, mask)
+
                 
             return imgs_left, ele_gt, mask, voxel_uv_left, timestamp
 
 
         else:
             img_path = self.pairs[idx][0]
+            print(img_path)
             depth_path = self.pairs[idx][1]
             imgs_left = Image.open(img_path)
-            print("image_size: ", imgs_left.size)
+            #print("image_size: ", imgs_left.size)
             #print(img_path)
         #print(depth_path)
 
@@ -459,6 +405,7 @@ class CARDSetDataset(Dataset):
 
             data = np.load(depth_path)
             points = data['pts_cam'] # N*3 array
+            npz_to_ply(depth_path, "pointcloud.ply")
             #print(f"Height before values (y): min={points[:, 1].min()}, max={points[:, 1].max()}")
             #coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0, origin=[0, 0, 0])
 
@@ -503,6 +450,13 @@ class CARDSetDataset(Dataset):
             uvz_left =  intrinsic_downscaled @ voxel_cam_left
             voxel_uv_left = torch.floor(uvz_left[:2, :] / uvz_left[2:, :]).type(torch.long)
 
+            H, W = transforms.ToTensor()(imgs_left).shape[-2:]  # Get actual image dimensions
+            valid_mask = (voxel_uv_left[0] >= 0) & (voxel_uv_left[0] < W) & \
+                        (voxel_uv_left[1] >= 0) & (voxel_uv_left[1] < H)
+
+            if valid_mask.sum() / valid_mask.numel() < 0.7:  # Less than 70% valid
+                raise ValueError(f"Only {valid_mask.sum()}/{valid_mask.numel()} voxels project within camera frustum")
+
             #print(f"voxel_uv_left{voxel_uv_left.shape}")
             #print(voxel_uv_left[:, -1])
             #print(voxel_uv_left[:, 16000])
@@ -527,9 +481,10 @@ class CARDSetDataset(Dataset):
             vol.bounding_polygon = o3d.utility.Vector3dVector(crop_bounding)
             #self.save_gt_points(pcd_cam2vert, "before_crop" + str(img_path.stem) + ".png")
             pcd_cam2vert = vol.crop_point_cloud(pcd_cam2vert) """
+            #self.save_gt_points(pcd_cam2vert, "before_crop" + str(Path(img_path).stem) + ".png")
             pcd_cam2vert = self.crop_point_cloud(pcd_cam2vert)
             points = np.asarray(pcd_cam2vert.points)
-            #self.save_gt_points(pcd_cam2vert, str(img_path.stem) + ".png")
+            #self.save_gt_points(pcd_cam2vert, str(Path(img_path).stem) + ".png")
             #o3d.visualization.draw_geometries([camera_frame, coord_frame, pcd_cam2vert])
         #print(f"Height after crop values (y): min={points[:, 1].min()}, max={points[:, 1].max()}")
 
@@ -553,7 +508,7 @@ class CARDSetDataset(Dataset):
             height_map, mask = self.get_gt_elevation(pcd_cam2vert)
             #print(f"croppoint count{np.asarray(pcd_cam2vert.points)[:, 1].max()}")
             #if idx % 10 == 0:
-                #self.visualize_height_map_and_mask(height_map, mask, colormap='viridis', save_path='Heightmap/height_map_visualization' + str(img_path.stem) + 'png')
+             #   self.visualize_height_map_and_mask(height_map, mask, colormap='plasma', save_path='height_map_visualization' + str(Path(img_path).stem) + 'png')
             #print(height_map.shape, height_map[:, 1])
             
             # Convert to tensors
@@ -809,7 +764,7 @@ class CARDSetDataset(Dataset):
 
     def visualize_height_map_and_mask(self, height_map, mask, colormap='plasma', save_path='Heightmap/height_map_visualization.png'):
         """
-        Visualize the height map and mask. Cells without points are black, and cells with height GT are mapped with a colormap.
+        Visualize the height map and mask with coordinate axes and proper colorbar.
 
         Parameters:
             height_map (torch.Tensor): The height map tensor of shape (H, W).
@@ -817,47 +772,46 @@ class CARDSetDataset(Dataset):
             colormap (str): The colormap to use for valid height values (default: 'plasma').
             save_path (str): Path to save the visualization image.
         """
-       # Ensure height_map and mask are numpy arrays
         print("save in:", save_path)
         height_map = height_map.cpu().numpy() if isinstance(height_map, torch.Tensor) else height_map
         mask = mask.cpu().numpy() if isinstance(mask, torch.Tensor) else mask
 
-        # Create an RGBA image where invalid cells are black
-        height_map_normalized = (height_map - np.min(height_map[mask > 0])) / (np.max(height_map[mask > 0]) - np.min(height_map[mask > 0]))
-        height_map_normalized = np.clip(height_map_normalized, 0, 1)  # Normalize to [0, 1]
-        colormap_func = plt.cm.get_cmap(colormap)
-        height_map_colored = colormap_func(height_map_normalized)  # Apply colormap
-        height_map_colored = (height_map_colored[:, :, :3] * 255).astype(np.uint8)  # Convert to RGB
+        # Get min/max of valid height values
+        valid_heights = height_map[mask > 0]
+        h_min, h_max = valid_heights.min(), valid_heights.max()
 
-        # Set invalid cells (mask == 0) to black
+        # Normalize height map for visualization
+        height_map_normalized = np.zeros_like(height_map)
+        height_map_normalized[mask > 0] = (height_map[mask > 0] - h_min) / (h_max - h_min + 1e-6)
+        height_map_normalized = np.clip(height_map_normalized, 0, 1)
+
+        # Apply colormap
+        colormap_func = plt.cm.get_cmap(colormap)
+        height_map_colored = colormap_func(height_map_normalized)[:, :, :3]
+
+        # Set invalid cells to black
         height_map_colored[mask == 0] = [0, 0, 0]
 
-        # Display the visualization
-        plt.figure(figsize=(10, 6))
-        plt.imshow(height_map_colored)
-        plt.axis()
-        plt.title('Height Map Visualization')
-        plt.tight_layout()
-        cbar = plt.colorbar()
-        cbar.set_label('cm')
-        max = height_map[mask > 0].max()
-        min = height_map[mask > 0].min()
-
-        def to_cm(tick_val, pos=None):
-            # tick_val is in [0, 255]; convert to cm proportionally to the original range
-            return (tick_val / 255.0) * (max - min) + min
+        # Create figure with proper coordinate mapping
+        fig, ax = plt.subplots(figsize=(12, 8))
+        im = ax.imshow(height_map_colored, extent=[self.roi_x[0], self.roi_x[1], self.roi_z[0], self.roi_z[1]], aspect='auto', origin='upper')
         
-
-        from matplotlib.ticker import FuncFormatter
-
-        cbar.formatter = FuncFormatter(lambda v, pos: f"{to_cm(v):.2f}")
-        cbar.update_ticks()
-
-
-        # Save the visualization
-        plt.savefig(save_path, dpi=300)
-        #plt.show()
-        ##print(f"Height map visualization saved to {save_path}")
+        ax.set_xlabel('X (m)', fontsize=12)
+        ax.set_ylabel('Z (m)', fontsize=12)
+        ax.set_title('Height Map Visualization', fontsize=14)
+        ax.grid(True, alpha=0.3)
+        
+        # Add colorbar with correct height value mapping
+        cbar = plt.colorbar(im, ax=ax, label='Height (cm)', pad=0.02)
+        cbar_ticks = np.linspace(0, 1, 6)
+        cbar.set_ticks(cbar_ticks)
+        cbar_labels = [f"{h_min + t * (h_max - h_min):.1f}" for t in cbar_ticks]
+        cbar.set_ticklabels(cbar_labels)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Height map visualization saved to {save_path}")
 
 
     def get_cam2vert(self, cam_up, normal_y_up):
@@ -925,18 +879,18 @@ class CARDSetDataset(Dataset):
         plt.tight_layout()
 
         # Save the plot as a PNG file
-        #plt.savefig('pointcloud_projection' + str + '.png', dpi=300)
+        plt.savefig('pointcloud_projection' + str + '.png', dpi=300)
         plt.show()
 
-    def get_gt_elevation(self, xyz):
+    def get_gt_elevation(self, xyz, camera_height=None):
         #transform in world coordinate
         xyz = np.asarray(xyz.points)
-
+        cam_h = camera_height if camera_height is not None else self.camera_height
 
         points_y = xyz[:, 1]*100  # points, m --> cm
         points_xz = xyz[:, [0, 2]]
         grids_y = torch.zeros((self.num_grids_z, self.num_grids_x), dtype=torch.float32)
-        grids_count = torch.zeros((self.num_grids_z, self.num_grids_x), dtype=torch.int8)
+        grids_count = torch.zeros((self.num_grids_z, self.num_grids_x), dtype=torch.int32)  # int8 overflows at 127
 
         for xz, y in zip(points_xz, points_y):
             idx_x = torch.clip(((xz[0] - self.roi_x[0]) / self.grid_res[0]).int(), max=self.num_grids_x-1)
@@ -945,7 +899,7 @@ class CARDSetDataset(Dataset):
             grids_count[idx_z, idx_x] += 1
         mask = grids_count > 0
 
-        grids_y[mask] = self.camera_height*100 - grids_y[mask] / grids_count[mask]
+        grids_y[mask] = cam_h*100 - grids_y[mask] / grids_count[mask]
 
         return grids_y, mask
     
@@ -1481,7 +1435,7 @@ class CARDSetDatasetV2Smalldataset(Dataset):
         # Project to height map
         height_map, mask = self.get_gt_elevation(pcd_cam2vert)
         #print(f"croppoint count{np.asarray(pcd_cam2vert.points)[:, 1].max()}")
-        self.visualize_height_map_and_mask(height_map, mask, colormap='plasma', save_path='Heightmap/height_map_visualization.png' + str(self.image_files[idx]))
+        self.visualize_height_map_and_mask(height_map, mask, colormap='veridis', save_path='Heightmap/height_map_visualization.png' + str(self.image_files[idx]))
         #print(height_map.shape, height_map[:, 1])
         
         # Convert to tensors
@@ -1501,7 +1455,7 @@ class CARDSetDatasetV2Smalldataset(Dataset):
 
 
     def matrix2euler(self, m):
-        # order='XYZ'
+        # order='XY '
         d = np.clip
         m = m.reshape(-1)
         a, f, g, k, l, n, e = m[0], m[1], m[2], m[4], m[5], m[7], m[8]
@@ -1515,26 +1469,28 @@ class CARDSetDatasetV2Smalldataset(Dataset):
         return np.array([x, y, z], dtype=np.float32)
 
     def crop_image (self, K, image):
-        print("test:", image.size)
-        W, H = image.size
-        w_c = 952
-        h_c = 518
-        u_0 = (W - w_c) / 2
-        v_0 = (H - h_c) / 2
-        u_1 = (W + w_c) / 2
-        v_1 = (H + h_c) / 2
-        #imgs_left = image.crop((u_0, v_0, u_1, v_1))
-        imgs_left = image.resize((w_c, h_c))
-        scale_x = W/w_c
-        scale_y = H/h_c
-        intrinsic = K
-        intrinsic[0:2] = intrinsic[0:2] / scale_x  #cx
-        intrinsic[1:2] = intrinsic[1:2] / scale_y  #cy
-        intrinsic[0:0] = intrinsic[0:0] / scale_x  #fx
-        intrinsic[1:1] = intrinsic[1:1] / scale_y  #fy
-       
+        """
+        Resize image and adjust camera intrinsics accordingly.
+        Note: This function resizes, not crops (despite the name).
+        """
+        W, H = image.size  # Original dimensions
+        w_c, h_c = 952, 518  # Target dimensions
 
-        return imgs_left, intrinsic 
+        # Resize image
+        resized_image = image.resize((w_c, h_c))
+
+        # Calculate scale factors (new_size / old_size)
+        scale_x = w_c / W
+        scale_y = h_c / H
+
+        # Adjust intrinsics for resize
+        K_new = K.clone()
+        K_new[0, 0] *= scale_x  # fx
+        K_new[1, 1] *= scale_y  # fy
+        K_new[0, 2] *= scale_x  # cx
+        K_new[1, 2] *= scale_y  # cy
+
+        return resized_image, K_new 
     
     @staticmethod
     def visualize_height_map_and_mask(height_map, mask, colormap='plasma', save_path='Heightmap/height_map_visualization.png', vmin= None, vmax=None):
@@ -1655,15 +1611,15 @@ class CARDSetDatasetV2Smalldataset(Dataset):
         plt.savefig('pointcloud_projection' + str + '.png', dpi=300)
         plt.show()
 
-    def get_gt_elevation(self, xyz):
+    def get_gt_elevation(self, xyz, camera_height=None):
         #transform in world coordinate
         xyz = np.asarray(xyz.points)
-
+        cam_h = camera_height if camera_height is not None else self.camera_height
 
         points_y = xyz[:, 1]*100  # points, m --> cm
         points_xz = xyz[:, [0, 2]]
         grids_y = torch.zeros((self.num_grids_z, self.num_grids_x), dtype=torch.float32)
-        grids_count = torch.zeros((self.num_grids_z, self.num_grids_x), dtype=torch.int8)
+        grids_count = torch.zeros((self.num_grids_z, self.num_grids_x), dtype=torch.int32)  # int8 overflows at 127
 
         for xz, y in zip(points_xz, points_y):
             idx_x = torch.clip(((xz[0] - self.roi_x[0]) / self.grid_res[0]).int(), max=self.num_grids_x-1)
@@ -1672,7 +1628,7 @@ class CARDSetDatasetV2Smalldataset(Dataset):
             grids_count[idx_z, idx_x] += 1
         mask = grids_count > 0
 
-        grids_y[mask] = self.camera_height*100 - grids_y[mask] / grids_count[mask]
+        grids_y[mask] = cam_h*100 - grids_y[mask] / grids_count[mask]
 
         return grids_y, mask
     
@@ -2090,16 +2046,16 @@ def save_image_path_in_list(input_dir, output_dir):
     print("finished making small_data_training_list")
 
 if __name__ == "__main__":
-    """ parser = argparse.ArgumentParser(description= "Preprocess CARIADDataset and save as pickle files")
+    parser = argparse.ArgumentParser(description= "Preprocess CARIADDataset and save as pickle files")
     parser.add_argument('--preprocess', action='store_false', help = '')
     parser.add_argument('--mode', type=str, default='train', help='train or val')
     args = parser.parse_args()
     dataset = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/train_all_data_clean_NN_RHF.txt', mode='train')
     dataset_val = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='train')
-    #dataset.preprocess_and_save_data(output_dir="/data/rhf/train_preprocessed_small_data", mode = args.mode)
-    dataset_val.preprocess_and_save_data(output_dir="/data/rhf/val_preprocessed_small_data", mode = args.mode) """
+    #dataset.preprocess_and_save_data(output_dir="/data/rhf/train_preprocessed_small_data2", mode = args.mode)
+    dataset_val.preprocess_and_save_data(output_dir="/data/rhf/val_preprocessed_small_data2", mode = args.mode)
 
-    import numpy as np
+    """ import numpy as np
     import cv2
     print(os.listdir())
     # ---------- load npz ----------
@@ -2147,3 +2103,4 @@ if __name__ == "__main__":
     
     #save_image_path_in_list(input_dir = "/data/rhf/val_preprocessed_small_data", output_dir = "/data/rhf/val_small_dataset.txt")
     #save_image_path_in_list(input_dir = "/data/rhf/train_preprocessed_small_data", output_dir = "/data/rhf/train_small_dataset.txt")
+ """
