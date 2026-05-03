@@ -13,7 +13,8 @@ from torch.cuda.amp import GradScaler
 from models.loss import MyLoss, LossReg, LossReg2, affine_invariant_global_loss, MSE_normal_loss
 from models.structural_losses import CompositeLoss
 from torch.utils.data import DataLoader
-from models.model import Elevation
+from models.model import Elevation as ElevationDA3, visualize_encoder_pca
+from models.model_dinov2_fb import Elevation as ElevationDinoV2FB
 import pickle
 from torch.hub import load_state_dict_from_url
 import os
@@ -75,6 +76,38 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler= None, dev
     print(f"Resumed from epoch {start_epoch}, global step {global_step}")
 
     return start_epoch, global_step
+
+
+def get_percentile_bounds(gt, mask, lower_pct: float = 5.0, upper_pct: float = 95.0):
+    """
+    Compute the visualization range from valid ground truth values.
+
+    Uses the lower and upper percentiles of masked ground truth values to exclude outliers.
+
+    Args:
+        gt: torch.Tensor or numpy array of ground truth height values.
+        mask: torch.Tensor or numpy array mask where 1 indicates valid values.
+        lower_pct: Lower percentile to use for vmin.
+        upper_pct: Upper percentile to use for vmax.
+
+    Returns:
+        tuple(float, float): (vmin, vmax)
+    """
+    if torch.is_tensor(gt):
+        gt = gt.detach().cpu().numpy()
+    if torch.is_tensor(mask):
+        mask = mask.detach().cpu().numpy()
+
+    valid = gt[mask != 0]
+    if valid.size == 0:
+        valid = gt.flatten()
+
+    vmin = float(np.percentile(valid, lower_pct))
+    vmax = float(np.percentile(valid, upper_pct))
+    if vmin == vmax:
+        vmin = float(valid.min())
+        vmax = float(valid.max())
+    return vmin, vmax
 
 class EarlyStopping:
     def __init__(self, patience=5, min_delta=0.0):
@@ -186,7 +219,7 @@ def train_regression():
                     (imgs_left, ele_gt, ele_mask, proj_index_left, _) = sample
                 imgs_left, ele_gt, ele_mask, proj_index_left = imgs_left.cuda(), ele_gt.cuda(), ele_mask.cuda(), proj_index_left.cuda()
 
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 with torch.cuda.amp.autocast(dtype=torch.float16):
                     if args.stereo:
                         ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
@@ -194,7 +227,8 @@ def train_regression():
                         ele_pred = model(imgs_left, proj_index_left)
 
                         #print("train ele pred shape:", ele_pred.shape)
-                        
+                    
+
                     loss_all = loss_func(ele_pred, ele_gt, ele_mask)
 
                     #metric for evaluation
@@ -217,36 +251,55 @@ def train_regression():
                         ele_pred_fixed = unnormalize(ele_pred_fixed, h_min, h_max)
                         print("max and min after normalization:", ele_pred_fixed.max().item(), ele_pred_fixed.min().item())
 
+                if i == 0:
+                        try:
+                            model.eval()
+                            with torch.no_grad():
+                                _ = model(train_imgs_fixed[:1].cuda(), train_proj_fixed[:1].cuda())
+                            model.train()
+                            rgb = visualize_encoder_pca(
+                                model._last_features,
+                                f"/tmp/pca_encoder_epoch{epoch_idx+1}.png",
+                            )
+                            wandb.log(
+                                {"train/encoder_features_pca": wandb.Image(
+                                    rgb, caption=f"epoch {epoch_idx+1} (fixed sample 0)")},
+                                step=global_step,
+                            )
+                        except Exception as e:
+                            print(f"[pca log] skipped: {e}")
             #/****logging ***********************
                 print("logging step:", global_step, args.summary_freq)
                 if global_step % args.summary_freq == 0: 
                     model.eval()
-                    with torch.no_grad():
-                        ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
+                    with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float16):
+                        ele_pred_fixed = model(train_imgs_fixed.cuda(), train_proj_fixed.cuda())
                     
-                    log_dict = {}
-                    for s in range(len(fixed_train_indices)):
-                        if not logged_train_static:
-                            gt_np = np.ma.masked_where(
-                            train_mask_fixed[s].cpu().numpy() == 0,
-                            train_gt_fixed[s].cpu().numpy(),
+                        log_dict = {}
+                        for s in range(len(fixed_train_indices)):
+                            if not logged_train_static:
+                                gt_vmin[s], gt_vmax[s] = get_percentile_bounds(
+                                    train_gt_fixed[s],
+                                    train_mask_fixed[s],
+                                    lower_pct=5.0,
+                                    upper_pct=95.0,
+                                )
+
+                            height_prediction = ele_pred_fixed[s]#, 0]	
+                            combined_img = wandb_combined_image(
+                            height_prediction.squeeze(),
+                            train_gt_fixed[s],
+                            train_mask_fixed[s],
+                            train_imgs_fixed[s],
+                            caption=f"Combined Visualization of sample {s} at step {global_step}",
+                            vmin=gt_vmin[s],
+                            vmax=gt_vmax[s],
                             )
-                            gt_vmin[s] = gt_np.min()
-                            gt_vmax[s] = gt_np.max()
+                            wandb.log({"train/combined_sample_" + str(s): combined_img}, step=global_step)
 
-                        height_prediction = ele_pred_fixed[s]#, 0]	
-                        combined_img = wandb_combined_image(
-                        height_prediction.squeeze(),
-                        train_gt_fixed[s],
-                        train_mask_fixed[s],
-                        train_imgs_fixed[s],
-                        caption=f"Combined Visualization of sample {s} at step {global_step}",
-                        vmin=gt_vmin[s],
-                        vmax=gt_vmax[s],
-                        )
-                        wandb.log({"train/combined_sample_" + str(s): combined_img}, step=global_step)
-
-                    logged_train_static = True
+                        logged_train_static = True
+                    del ele_pred_fixed
+                    torch.cuda.empty_cache()
                     model.train()
                     #wandb.log(log_dict, step=global_step)
                 scaler.scale(loss_all).backward()
@@ -262,6 +315,8 @@ def train_regression():
                     scheduler.step()
 
                 wandb.log({"train/lr": scheduler.get_last_lr()[0]}, step = global_step)
+                if len(scheduler.get_last_lr()) > 1:
+                    wandb.log({"train/lr_encoder": scheduler.get_last_lr()[1]}, step = global_step)
                 wandb.log({"train/mae": mae_l1.item()}, step=global_step)
                 epoch_active_time = time.time() - start_time
                 loss_wandb = loss_all.detach().item()
@@ -301,7 +356,7 @@ def train_regression():
                     wandb.log({"metrics/le90": metric_all[5]}, step = global_step)
                     wandb.log({"metrics/grad_err": metric_all[6]}, step = global_step)
 
-                if global_step % (10000) == 0:
+                if global_step % (100 * args.summary_freq) == 0:
                     torch.save({"model": model.state_dict(),
                                "optimizer": optimizer.state_dict(),
                                 "epoch": epoch_idx + 1,
@@ -338,7 +393,8 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
     total_error = 0.0
     total_valid_pixels = 0
     #save file for visualization pytorch
-    ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
+    with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float16):
+        ele_pred_fixed = model(eval_imgs_fixed.cuda(), eval_proj_fixed.cuda())
     with torch.no_grad():
         for s in range(len(fixed_eval_indices)):
             if args.normalize:
@@ -346,12 +402,12 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
                 ele_pred_fixed = unnormalize(ele_pred_fixed, h_min, h_max)
             
             if not logged_eval_static:
-                gt_np = np.ma.masked_where(
-                            eval_mask_fixed[s].cpu().numpy() == 0,
-                            eval_gt_fixed[s].cpu().numpy(),
-                        )
-                gt_vmin[s] = gt_np.min()
-                gt_vmax[s] = gt_np.max()
+                gt_vmin[s], gt_vmax[s] = get_percentile_bounds(
+                    eval_gt_fixed[s],
+                    eval_mask_fixed[s],
+                    lower_pct=5.0,
+                    upper_pct=95.0,
+                )
 
             height_prediction = ele_pred_fixed[s]
             combined_img = wandb_combined_image(
@@ -365,6 +421,7 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
                             test=True
                             )
             wandb.log({"test/combined_sample_" + str(s): combined_img}, step=global_step)
+        del ele_pred_fixed
         logged_eval_static = True
         for i, sample in enumerate(test_loader):
             if args.stereo:
@@ -380,7 +437,7 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
                     ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
                 else:
                     ele_pred = model(imgs_left, proj_index_left)
-                    ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
+                    #ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
                     #ele_pred = ele_pred[:, 0, :, :] #from B, 2, H, W to B, H, W
                     #ele_pred_fixed = ele_pred_fixed[:, 0, :, :]
                 
@@ -398,8 +455,10 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
                 abs_error = abs_error.sum() / valid_count  # divide by valid pixels, not total
                 total_error += abs_error.item()
                 total_valid_pixels += ele_mask.sum().item()
+            del ele_pred, imgs_left, ele_gt, ele_mask, proj_index_left
 
     model.train()
+    torch.cuda.empty_cache()
     metric_values = metric.get_metric()
     metric.clear()
     eval_loss = total_error/len(test_loader)  #mean error per sample
@@ -432,7 +491,8 @@ def train():
     gt_vmax = [0, 0, 0]
     gt_vmin = [14, 14, 14]
     logged_eval_static = False
-    for epoch_idx in tqdm(range(args.epochs)):        
+    for epoch_idx in tqdm(range(args.epochs)):
+        time_epoch = time.time()
         with tqdm(total=len(train_loader), desc=f"Epoch {epoch_idx+1}", unit="batch") as pbar:
             for i, sample in enumerate(train_loader):
                 global_step += 1
@@ -455,13 +515,30 @@ def train():
                 imgs_left, ele_gt, ele_mask, proj_index_left = imgs_left.cuda(), ele_gt.cuda(), ele_mask.cuda(), proj_index_left.cuda()
 
 
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 with torch.cuda.amp.autocast(dtype=torch.float16):
                     if args.stereo:
                         ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
                     else:
                         ele_pred = model(imgs_left, proj_index_left)
                         print("train ele pred shape:", ele_pred.shape)
+                    if i == 0:
+                        try:
+                            model.eval()
+                            with torch.no_grad():
+                                _ = model(train_imgs_fixed[:1].cuda(), train_proj_fixed[:1].cuda())
+                            model.train()
+                            rgb = visualize_encoder_pca(
+                                model._last_features,
+                                f"/tmp/pca_encoder_epoch{epoch_idx+1}.png",
+                            )
+                            wandb.log(
+                                {"train/encoder_features_pca": wandb.Image(
+                                    rgb, caption=f"epoch {epoch_idx+1} (fixed sample 0)")},
+                                step=global_step,
+                            )
+                        except Exception as e:
+                            print(f"[pca log] skipped: {e}")
                     loss_all = loss_func(ele_pred, ele_gt, ele_mask)
                     #metric for evaluation
                     ele_mask_roi = torch.logical_and(ele_gt > -ele_range, ele_gt < ele_range)
@@ -479,16 +556,16 @@ def train():
                 if global_step % args.summary_freq == 0: 
                     log_dict = {}
                     model.eval()
-                    with torch.no_grad():
+                    with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float16):
                         ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
                     for s in range(len(fixed_train_indices)):
                         if not logged_train_static:
-                            gt_np = np.ma.masked_where(
-                            train_mask_fixed[s].cpu().numpy() == 0,
-                            train_gt_fixed[s].cpu().numpy(),
+                            gt_vmin[s], gt_vmax[s] = get_percentile_bounds(
+                                train_gt_fixed[s],
+                                train_mask_fixed[s],
+                                lower_pct=5.0,
+                                upper_pct=95.0,
                             )
-                            gt_vmin[s] = gt_np.min()
-                            gt_vmax[s] = gt_np.max()
 
                         height_prediction =  F.softmax(ele_pred_fixed[s], dim=0)
                         height_prediction = torch.sum(height_prediction * model.ele_values[0],dim=0)
@@ -514,6 +591,8 @@ def train():
                 scheduler.step()
                 epoch_active_time = time.time() - start_time
                 wandb.log({"train/lr": scheduler.get_last_lr()[0]}, step = global_step)
+                if len(scheduler.get_last_lr()) > 1:
+                    wandb.log({"train/lr_encoder": scheduler.get_last_lr()[1]}, step = global_step)
                 wandb.log({"train/mae": mae_l1.item()}, step=global_step)
                 loss_wandb = loss_all.data.item()
                 if np.isnan(loss_wandb):
@@ -552,7 +631,7 @@ def train():
                     log_file.flush()
                     print(info)
                 
-                if global_step % (10000) == 0:
+                if global_step % (300 * args.summary_freq) == 0:
                     torch.save({"model": model.state_dict(),
                                "optimizer": optimizer.state_dict(),
                                 "epoch": epoch_idx + 1,
@@ -562,6 +641,9 @@ def train():
                 epoch_passiv_time = time.time() - epoch_active_time
                 #run.log({"epoch_log_time": epoch_passiv_time, "epoch_active_time": epoch_active_time})
             pbar.update(1)
+            time_epoch_end = time.time() - time_epoch
+            wandb.log({"epoch/epoch_duration": time_epoch_end}, step=global_step)
+            wandb.log({"epoch/epoch": epoch_idx+1}, step=global_step)
             if early_stopping.should_stop:
                 print("Early stopping triggered!")
                 break
@@ -575,7 +657,8 @@ def test_sample(test_loader, global_step, run, logged_eval_static=False):
     h_min = - ele_range*100
     h_max = ele_range*100
     #save file for visualization pytorch
-    ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
+    with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float16):
+        ele_pred_fixed = model(eval_imgs_fixed.cuda(), eval_proj_fixed.cuda())
     total_error = 0.0
     total_valid_pixels = 0
 
@@ -585,12 +668,12 @@ def test_sample(test_loader, global_step, run, logged_eval_static=False):
             ele_pred_fixed = ele_pred_fixed * ((h_max - h_min) / 2) + ((h_max + h_min) / 2)
         
         if not logged_eval_static:
-            gt_np = np.ma.masked_where(
-                        eval_mask_fixed[s].cpu().numpy() == 0,
-                        eval_gt_fixed[s].cpu().numpy(),
-                    )
-            gt_vmin[s] = gt_np.min()
-            gt_vmax[s] = gt_np.max()
+            gt_vmin[s], gt_vmax[s] = get_percentile_bounds(
+                eval_gt_fixed[s],
+                eval_mask_fixed[s],
+                lower_pct=5.0,
+                upper_pct=95.0,
+            )
 
         height_prediction = ele_pred_fixed[s]
         combined_img = wandb_combined_image(
@@ -619,10 +702,7 @@ def test_sample(test_loader, global_step, run, logged_eval_static=False):
                 ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
             else:
                 ele_pred = model(imgs_left, proj_index_left)
-                ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
             metric.compute(ele_pred, ele_gt, ele_mask)
-            #print("youuuu", ele_pred.shape, ele_gt.shape)
-            #ele_pred = torch.tensor(ele_pred.unsqueeze(dim=0))
 
             abs_error = torch.abs(
                 ele_pred - ele_gt
@@ -632,9 +712,10 @@ def test_sample(test_loader, global_step, run, logged_eval_static=False):
             abs_error = abs_error.sum() / valid_count  # divide by valid pixels, not total
             total_error += abs_error.item()
             total_valid_pixels += ele_mask.sum().item()
-
+            del ele_pred, imgs_left, ele_gt, ele_mask, proj_index_left
 
     model.train()
+    torch.cuda.empty_cache()
     metric_values = metric.get_metric()
     metric.clear()
     eval_loss = total_error/len(test_loader) 
@@ -753,6 +834,17 @@ def wandb_combined_image(
     gt = np.ma.masked_where(mask == 0, gt)
     error = np.ma.masked_where(mask == 0, pred - gt)
 
+    # Use percentile-based bounds for the error map to reduce outlier influence.
+    error_values = error.compressed() if np.ma.is_masked(error) else error.flatten()
+    if error_values.size > 0:
+        error_range = np.percentile(np.abs(error_values), 95.0)
+        error_vmin, error_vmax = -float(error_range), float(error_range)
+        if error_vmin == error_vmax:
+            error_vmin = float(error_values.min())
+            error_vmax = float(error_values.max())
+    else:
+        error_vmin, error_vmax = -1.0, 1.0
+
     # --- Create the figure ---
     fig, axes = plt.subplots(1, 4, figsize=(16, 4))
 
@@ -769,7 +861,7 @@ def wandb_combined_image(
     fig.colorbar(im_gt, ax=axes[1], fraction=0.046, pad=0.04)
 
     # Error Map
-    im_error = axes[2].imshow(error, cmap="RdBu_r")
+    im_error = axes[2].imshow(error, cmap="RdBu_r", vmin=error_vmin, vmax=error_vmax)
     axes[2].set_title("Error Map")
     axes[2].axis("off")
     fig.colorbar(im_error, ax=axes[2], fraction=0.046, pad=0.04, label="Error (cm)")
@@ -806,14 +898,13 @@ def wandb_rgb_image(img, caption):
     img = img.detach().cpu().permute(1, 2, 0).numpy()
     return wandb.Image(img, caption=caption)
 
-def get_fixed_samples(dataset, indices, device):
+def get_fixed_samples(dataset, indices):
     samples = [dataset[i] for i in indices]
     print("fetch from visual")
-    imgs = torch.stack([s[0] for s in samples]).to(device)
-    ele_gt = torch.stack([s[1] for s in samples]).to(device)
-    ele_mask = torch.stack([s[2] for s in samples]).to(device)
-    proj_idx = torch.stack([s[3] for s in samples]).to(device)
-
+    imgs = torch.stack([s[0] for s in samples])    # kept on CPU
+    ele_gt = torch.stack([s[1] for s in samples])
+    ele_mask = torch.stack([s[2] for s in samples])
+    proj_idx = torch.stack([s[3] for s in samples])
     return imgs, ele_gt, ele_mask, proj_idx
 
 def denormalize(img, mean, std):
@@ -902,6 +993,7 @@ if __name__ == '__main__':
     parser.add_argument('--cla_res', type=float, default=0.5, help='class resolution for elevation classification')
     parser.add_argument('--batch_size', type=int, default=8, help='training batch size')
     parser.add_argument('--lr', type=float, default=1e-4, help='maximum learning rate')
+    parser.add_argument('--lr_encoder', type=float, default=1e-5, help='peak LR for the encoder param group (only relevant when --train_encoder is set; encoder is frozen otherwise).')
     parser.add_argument('--epochs', type=int, default=50, help='number of epochs to train')
     parser.add_argument('--logdir', default='/data/rhf/checkpoints/', help='the directory to save logs and checkpoints')
     parser.add_argument('--loadckpt', default=None, help='load the weights from a specific checkpoint')
@@ -919,6 +1011,9 @@ if __name__ == '__main__':
     parser.add_argument('--preprocessed', action='store_true', help='if yes, the dataloader will load preprocessed data')
     parser.add_argument('--load_pt', default=None, help='load weights, optimizer, start_idx to resume run')
     parser.add_argument('--dino', default="small", help='ViT encoder size')
+    parser.add_argument('--clamp_gt', action='store_true', help='if set, clamp GT elevation values to [-y_range*100, y_range*100] cm in the dataloader (in addition to the existing ROI mask filtering)')
+    parser.add_argument('--crop_to_road', action='store_true', help='if set, the dataloader crops each image to the bbox of the projected voxel ROI (+10% padding), resizes back to 560x560, and adjusts the intrinsic / voxel_uv accordingly. Preprocessed cache must be regenerated when toggling this flag.')
+    parser.add_argument('--train_encoder', action='store_true', help='if set, the DepthAnything3 backbone runs without torch.no_grad() so its weights are updated during training (default: encoder is frozen).')
 
     # parse arguments, set seeds
     # args = parse_args_with_config()
@@ -948,52 +1043,56 @@ if __name__ == '__main__':
         test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
 
     elif 'CARDSetV2Small' in args.dataset:
-        test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
-        train_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
+        test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
+        train_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
         # Batch size and summary_freq now come from config file, not hardcoded here
         args.batch_size = 1
         args.summary_freq = 1
         args.epochs = 20
     elif 'CARDSetSmall' in args.dataset:
-        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/train_small_dataset.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = True) #args.augmentation)
-        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_small_dataset.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = False)
-
+        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/train_small_dataset_thesis.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = False, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_small_dataset_thesis.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = False, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
+        train_set.preprocessed_dir = '/data/rhf/train_preprocessed_small_data_thesis'
+        test_set.preprocessed_dir = '/data/rhf/val_preprocessed_small_data_thesis'
 
     elif 'CARDSet' in args.dataset:
-        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/train_all_data_clean_NN_RHF.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed)
-        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed)
-    
+        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/train_all_data_clean_NN_RHF.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
+        train_set.preprocessed_dir = '/data/rhf/train_preprocessed_data'
+        test_set.preprocessed_dir = '/data/rhf/val_preprocessed_data'
     else:
         print('unknown dataset!')
         exit(0)
 
 
     # IDENTICAL LOADERS FOR DEBUG: both use same data, batch size, and workers
-    train_loader = DataLoader(train_set, args.batch_size, shuffle=False, num_workers=8, drop_last=True, pin_memory=True)
-    
+    train_loader = DataLoader(train_set, args.batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=False)
+
     #test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='test', down_scale=args.down_scale)
     # For identical setup: same batch_size and num_workers as train_loader
-    test_loader = DataLoader(test_set, 1, shuffle=False, num_workers=8, drop_last=False, pin_memory=True)
+    test_loader = DataLoader(test_set, 1, shuffle=False, num_workers=8, drop_last=False, pin_memory=False)
     print('dataset size - train:%d, test:%d' % (len(train_loader), len(test_loader)))
 
     #get fixed sample for logging
-    fixed_train_indices = [0]#, 1, 2]  
-    fixed_eval_indices  = [0]#, 1, 2]#,6,7]
+    fixed_train_indices = [0, 1, 2]  
+    fixed_eval_indices  = [0, 1, 2]#,6,7]
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    train_imgs_fixed, train_gt_fixed, train_mask_fixed, train_proj_fixed = get_fixed_samples(train_loader.dataset, fixed_train_indices)
 
-    train_imgs_fixed, train_gt_fixed, train_mask_fixed, train_proj_fixed = get_fixed_samples(train_loader.dataset, fixed_train_indices, device)
-
-    eval_imgs_fixed, eval_gt_fixed, eval_mask_fixed, eval_proj_fixed = get_fixed_samples(test_loader.dataset, fixed_eval_indices, device)
+    eval_imgs_fixed, eval_gt_fixed, eval_mask_fixed, eval_proj_fixed = get_fixed_samples(test_loader.dataset, fixed_eval_indices)
     
     # model, optimizer
     ele_range = train_set.y_range
     voxel_ele_res = train_set.grid_res[1]
     num_grids = [train_set.num_grids_x, train_set.num_grids_y, train_set.num_grids_z]
-    hori_centers = train_set.hori_centers.to(device) #B, H, W, 2 [0->x, 1->z]
+    if args.dataset != "RSRD":
+        hori_centers = train_set.hori_centers.to(device) #B, H, W, 2 [0->x, 1->z]
 
 
-    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize, args.pred_head_dim).cuda() #, args.dino
+    Elevation = ElevationDinoV2FB if 'DINOv2_fb' in args.backbone else ElevationDA3
+    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize, args.pred_head_dim, train_encoder=args.train_encoder).cuda() #, args.dino
     early_stopping = EarlyStopping(patience=300, min_delta=0.001)
     print('num params:', sum(p.numel() for p in model.parameters() if p.requires_grad))
     print(model)
@@ -1003,9 +1102,11 @@ if __name__ == '__main__':
     last_epoch = 0
     model.train()
     # Correct way to freeze the backbone
-    for param in model.feature_extraction.parameters():
-        param.requires_grad = False
-    model.feature_extraction.eval()
+
+    if not args.train_encoder:
+        for param in model.feature_extraction.parameters():
+            param.requires_grad = False
+        model.feature_extraction.eval()
     
     aloss = ReprojectionLoss((952, 518)).cuda()
 
@@ -1021,9 +1122,9 @@ if __name__ == '__main__':
         elif args.loss == 'composite':
             loss_func = CompositeLoss(
                 ele_range, hori_centers=hori_centers, normalize=args.normalize,
-                pixel_type='L2',
+                pixel_type='MSE',
                 w_pixel=0.3,      # primary supervision
-                w_gradient=1.0,   # Step 1: gradient is the key addition
+                w_gradient=1,   # Step 1: gradient is the key addition
                 w_structure=0.0,  # Step 3: enable at 0.5
                 w_normal=1,     # Step 4: enable at 0.1
                 w_smoothness=0.0, # Step 2: enable at 0.1
@@ -1059,7 +1160,7 @@ if __name__ == '__main__':
  
     scaler = GradScaler()
     print("model_state", model.feature_extraction.training)
-    lr_encoder = 1e-5
+    lr_encoder = args.lr_encoder
     encoder_params = list(model.feature_extraction.parameters())
     decoder_params = [param for name, param in model.named_parameters() if 'feature_extraction' not in name]
     print(f"number of decoder parameters: {sum(p.numel() for p in decoder_params)} vs number of parameter{sum(p.numel() for p in model.parameters())} vs number of encoder param {sum(p.numel() for p in encoder_params)}")
@@ -1090,7 +1191,7 @@ if __name__ == '__main__':
         min_lr=1e-6
     )
     else: 
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, epochs=args.epochs, pct_start=0.1,
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=[args.lr, lr_encoder], epochs=args.epochs, pct_start=0.1,
                                                         three_phase=False,
                                                         div_factor=20, anneal_strategy='linear',
                                                         steps_per_epoch=len(train_loader))
@@ -1106,6 +1207,7 @@ if __name__ == '__main__':
     shutil.copy('./models/efficientnet.py', os.path.join(args.logdir, 'efficientnet.py'))
     shutil.copy('./models/ele_head.py', os.path.join(args.logdir, 'ele_head.py'))
     shutil.copy('./models/patch2feature.py', os.path.join(args.logdir, 'patch2feature.py'))
+    shutil.copy('train.py', os.path.join(args.logdir, 'train.py'))
     # shutil.copy('train.py', os.path.join(args.logdir, 'train.py'))
     log_file = open(os.path.join(args.logdir, 'log.txt'), 'a')
     analyze_backbone_frozen_status(model)

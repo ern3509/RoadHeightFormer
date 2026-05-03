@@ -1,3 +1,4 @@
+import math
 import torch, sys
 import torch.nn as nn
 from typing import List, Sequence, Tuple, Union, Optional
@@ -452,3 +453,111 @@ def visualize_value(fused, name_of_file):
     else:
         None
         #save_feature_map(fused[0, 82], name_of_file)
+
+
+class DinoUpsampler(nn.Module):
+    """
+    Token -> dense feature map upsampler for ViT backbones (e.g. DINOv2).
+
+    Designed as a lighter, quality-preserving drop-in for `patch2feature`:
+      - keeps channel width near embed_dim until the very end,
+      - bilinear-resize-then-conv upsampling (no transposed-conv checkerboards),
+      - per-token LayerNorm matching DINOv2 normalisation,
+      - learned softmax-weighted fusion across the L selected ViT layers,
+      - residual bilinear skip from the deepest token map ('FeatUp-lite').
+
+    Forward signature mirrors `patch2feature.forward` so it can be swapped in
+    without changing call sites:
+        out = up(feats, H, W, h_out, w_out)
+
+    Args (forward):
+        feats : list of L tensors, each [B, N, embed_dim] (CLS already stripped).
+        H, W  : spatial size of the input image (used to derive ph, pw).
+        h_out, w_out : target dense-map size.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        output_dim: int = 256,
+        patch_size: int = 14,
+        num_layers: int = 4,
+        upsample_factor: int = 4,
+        hidden_dim: Optional[int] = None,
+        residual_skip: bool = True,
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.num_layers = num_layers
+        self.upsample_factor = upsample_factor
+        self.residual_skip = residual_skip
+        hidden_dim = hidden_dim or embed_dim
+
+        self.token_norms = nn.ModuleList(
+            [nn.LayerNorm(embed_dim) for _ in range(num_layers)]
+        )
+        self.layer_weights = nn.Parameter(torch.zeros(num_layers))
+
+        self.mix = nn.Sequential(
+            nn.Conv2d(embed_dim, hidden_dim, kernel_size=1, bias=False),
+            nn.GroupNorm(32, hidden_dim),
+            nn.GELU(),
+        )
+
+        n_stages = int(round(math.log2(float(upsample_factor))))
+        assert 2 ** n_stages == upsample_factor, "upsample_factor must be a power of 2"
+        self.upsample_blocks = nn.ModuleList()
+        for _ in range(n_stages):
+            self.upsample_blocks.append(
+                nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+                    nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1, bias=False),
+                    nn.GroupNorm(32, hidden_dim),
+                    nn.GELU(),
+                )
+            )
+
+        self.proj = nn.Conv2d(hidden_dim, output_dim, kernel_size=1)
+
+    def _tokens_to_map(self, tokens: torch.Tensor, ph: int, pw: int) -> torch.Tensor:
+        B, N, C = tokens.shape
+        assert N == ph * pw, f"token count {N} != ph*pw {ph*pw}"
+        return tokens.transpose(1, 2).reshape(B, C, ph, pw)
+
+    def forward(
+        self,
+        feats: List[torch.Tensor],
+        H: int,
+        W: int,
+        h_out: int,
+        w_out: int,
+        patch_start_idx: int = 0,
+    ) -> torch.Tensor:
+        assert len(feats) == self.num_layers
+        feats = [f[:, patch_start_idx:] for f in feats]
+        ph, pw = H // self.patch_size, W // self.patch_size
+
+        weights = torch.softmax(self.layer_weights, dim=0)
+        fused_tokens = sum(
+            w * self.token_norms[i](feats[i]) for i, w in enumerate(weights)
+        )
+
+        x = self._tokens_to_map(fused_tokens, ph, pw)
+        x = self.mix(x)
+
+        for block in self.upsample_blocks:
+            x = block(x)
+
+        if self.residual_skip:
+            deep = self._tokens_to_map(self.token_norms[-1](feats[-1]), ph, pw)
+            deep = nn.functional.interpolate(
+                deep, size=x.shape[-2:], mode="bilinear", align_corners=False
+            )
+            x = x + self.mix(deep)
+
+        if x.shape[-2:] != (h_out, w_out):
+            x = nn.functional.interpolate(
+                x, size=(h_out, w_out), mode="bilinear", align_corners=False
+            )
+
+        return self.proj(x)

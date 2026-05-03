@@ -10,7 +10,8 @@ from utils.dataset import RSRD
 from torch.cuda.amp import GradScaler
 from models.loss import MyLoss
 from torch.utils.data import DataLoader
-from models.model import Elevation
+from models.model import Elevation as ElevationDA3
+from models.model_dinov2_fb import Elevation as ElevationDinoV2FB
 import pickle
 import os
 from utils.metric import Metric
@@ -64,9 +65,9 @@ def test_sample(test_loader):
         if args.regression:
             None #pred = pred[:, 0, :, :] # B, H, W
            
-
-        CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(pred.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Testimage/' + str(cur_time.item()) + '_pred', vmin= vmin, vmax=vmax)
-        CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Testimage/' + str(cur_time.item()) + '_gt', vmin= vmin, vmax=vmax )
+        if i % 10 == 0:
+            CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(pred.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Testimage/' + str(cur_time.item()) + '_pred', vmin= vmin, vmax=vmax)
+            CARDSetDatasetV2Smalldataset.visualize_height_map_and_mask(ele_gt.squeeze(), ele_mask.squeeze(), colormap='plasma', save_path='Testimage/' + str(cur_time.item()) + '_gt', vmin= vmin, vmax=vmax )
         
         ender.record()
         torch.cuda.synchronize()
@@ -97,6 +98,8 @@ if __name__ == '__main__':
     parser.add_argument('--preprocessed', action='store_true', help='if yes, the dataloader will load preprocessed data')
     parser.add_argument('--load_pt', default=None, help='load weights, optimizer, start_idx to resume run')
     parser.add_argument('--dino', default="small", help='ViT encoder size')
+    parser.add_argument('--clamp_gt', action='store_true', help='if set, clamp GT elevation values to [-y_range*100, y_range*100] cm in the dataloader (in addition to the existing ROI mask filtering)')
+    parser.add_argument('--crop_to_road', action='store_true', help='if set, dataloader crops each image to the projected voxel ROI (+10% padding), resizes back to 560x560, and adjusts intrinsic / voxel_uv accordingly. Preprocessed cache must be regenerated when toggling this flag.')
 
     # parse arguments, set seeds
     args = parser.parse_args()
@@ -116,14 +119,14 @@ if __name__ == '__main__':
 
     # dataset, dataloader
     if 'CARDSetV2Small' == args.dataset:
-        test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
+        test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
 
     elif 'CARDSetSmall' == args.dataset:
-        print("Small preprocessed dataset")
-        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_small_dataset.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed)
+        print("Small preprocessed (thesis) dataset")
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_small_dataset_thesis.txt', mode='test', down_scale=args.down_scale, preprocessed_data=args.preprocessed, augmentation=False, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
 
     elif "CARDSet" == args.dataset:
-        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='test', down_scale=args.down_scale)
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='test', down_scale=args.down_scale, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
 
         #test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/RoadHeightFormer_test.txt', mode='test', down_scale=args.down_scale)
     
@@ -137,7 +140,7 @@ if __name__ == '__main__':
     #test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
     #test_set = CARDSetDataset(root_dir='/media/T7/cariad dataset/Nardo', mode='test', down_scale=args.down_scale)
     #test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale)
-    test_loader = DataLoader(test_set, 1, shuffle=False, num_workers=4, drop_last=False, pin_memory=True)
+    test_loader = DataLoader(test_set, 1, shuffle=False, num_workers=4, drop_last=False, pin_memory=False)
     print('test set:', len(test_set))
     log_dir = "testing_files"
     os.makedirs(log_dir, exist_ok=True)
@@ -149,6 +152,7 @@ if __name__ == '__main__':
     num_grids = [test_set.num_grids_x, test_set.num_grids_y, test_set.num_grids_z]
 
 
+    Elevation = ElevationDinoV2FB if 'DINOv2_fb' in args.backbone else ElevationDA3
     model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize, args.pred_head_dim).cuda()
     print(model)
     print('num params:', sum(p.numel() for p in model.parameters() if p.requires_grad))

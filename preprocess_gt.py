@@ -74,7 +74,7 @@ def get_item(index):
 
     viz.show_settings = True
     app.add_window(viz)
-    app.run()
+    #app.run()
     #o3d.visualization.draw_geometries([road_frame, mou])
 
     # crop the point cloud according to the given range of interest

@@ -96,7 +96,7 @@ class LocalStructureLoss(nn.Module):
         # local means (only over valid pixels, approximated)
         mu_p = F.conv2d(pred * mask_f, w, padding=self.pad)
         mu_g = F.conv2d(gt * mask_f, w, padding=self.pad)
-        count = F.conv2d(mask_f, w, padding=self.pad).clamp(min=1)
+        count = F.conv2d(mask_f, w, padding=self.pad).clamp(min=1e-3)
         mu_p = mu_p / count
         mu_g = mu_g / count
 
@@ -296,8 +296,15 @@ class CompositeLoss(nn.Module):
         roi_mask = (ele_gt > -self.ele_range) & (ele_gt < self.ele_range)
         mask = roi_mask & ele_mask.bool()
 
-        # Pixel loss (masked)
-        loss_pixel = self.pixel_loss(ele_pred[mask], ele_gt[mask])
+        # Fallback: if ROI mask eliminates all valid pixels, use ele_mask only
+        if mask.sum() == 0 and ele_mask.bool().sum() > 0:
+            mask = ele_mask.bool()
+
+        # Pixel loss (masked) — guard against empty mask
+        if mask.sum() == 0:
+            loss_pixel = torch.tensor(0.0, device=ele_pred.device)
+        else:
+            loss_pixel = self.pixel_loss(ele_pred[mask], ele_gt[mask])
 
         # Multi-scale gradient loss
         loss_grad = self.gradient_loss(ele_pred, ele_gt, mask) if self.w_gradient > 0 else torch.tensor(0.0, device=ele_pred.device)

@@ -387,10 +387,13 @@ from models.ele_head import *
 import math
 from .efficientnet import efficientnet_feature
 from utils.experiment import save_feature_map
-from .patch2feature import _make_scratch, _make_fusion_block, patch2feature, easy_transition_layer, make_pca
+from .patch2feature import _make_scratch, _make_fusion_block, patch2feature, easy_transition_layer, make_pca, DinoUpsampler
 import warnings
 import cv2
+from contextlib import nullcontext
 from sklearn.decomposition import PCA
+import numpy as np
+import os
 
 import sys
 sys.path.append('/home/f9ql00v/depth-anything3/Depth-Anything-3-main/src')
@@ -409,14 +412,70 @@ def print_types(obj, indent=0):
     else:
        print(f"{prefix}{type(obj).__name__}")
 
+def visualize_encoder_pca(features, save_path, patch_size=14, img_hw=None, layer_idx=-1, batch_idx=0):
+    """
+    Visualize encoder features via PCA -> RGB image.
+
+    Args:
+        features: encoder output. Supported shapes:
+            - Tensor [B, C, H, W]                       (e.g. EfficientNet)
+            - Tensor [B, N, C] with N = ph*pw (+ CLS)   (e.g. DINO single layer)
+            - List/tuple of [B, N, C] tensors           (e.g. DINO intermediate layers)
+        save_path:  where to write the PNG.
+        patch_size: ViT patch size (only used for token-shaped features).
+        img_hw:     (H, W) of the input image, required for token-shaped features
+                    so we can recover the spatial grid (ph = H // patch_size).
+        layer_idx:  which layer to visualize when `features` is a list.
+        batch_idx:  which sample of the batch to visualize.
+    """
+    if isinstance(features, (list, tuple)):
+        feat = features[layer_idx]
+    else:
+        feat = features
+
+    feat = feat.detach().float().cpu()
+
+    if feat.dim() == 4:
+        f = feat[batch_idx].permute(1, 2, 0)
+    elif feat.dim() == 3:
+        assert img_hw is not None, "img_hw=(H, W) required for token-shaped features"
+        H, W = img_hw
+        ph, pw = H // patch_size, W // patch_size
+        f = feat[batch_idx]
+        if f.shape[0] == ph * pw + 1:
+            f = f[1:]
+        elif f.shape[0] != ph * pw:
+            raise ValueError(
+                f"Token count {f.shape[0]} does not match ph*pw={ph*pw} (+CLS)"
+            )
+        f = f.reshape(ph, pw, -1)
+    else:
+        raise ValueError(f"Unsupported feature shape: {tuple(feat.shape)}")
+
+    H, W, C = f.shape
+    flat = f.reshape(-1, C).numpy()
+
+    pca = PCA(n_components=3)
+    rgb = pca.fit_transform(flat).reshape(H, W, 3)
+    mn = rgb.min(axis=(0, 1), keepdims=True)
+    mx = rgb.max(axis=(0, 1), keepdims=True)
+    rgb = (rgb - mn) / (mx - mn + 1e-8)
+    rgb = (rgb * 255).astype(np.uint8)
+
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    cv2.imwrite(save_path, rgb[:, :, ::-1])
+    return rgb
+
+
 class Elevation(nn.Module):
-    def __init__(self, stereo,  num_grids, ele_range, cla_res, regression=False, backbone = 'efficientnet', normalize=False, pred_dim =256):
+    def __init__(self, stereo,  num_grids, ele_range, cla_res, regression=False, backbone = 'efficientnet', normalize=False, pred_dim =256, train_encoder=False):
         super(Elevation, self).__init__()
         self.stereo = stereo
         self.num_grids_x, self.num_grids_y, self.num_grids_z = num_grids
         self.ele_range = ele_range   # in meter
         self.regression = regression
         self.backbone = backbone
+        self.train_encoder = train_encoder
 
         self.cla_res = cla_res
         self.num_classes = int(2 * self.ele_range*100 / self.cla_res)    #the smaller the clas_res, the more classes we have
@@ -424,8 +483,11 @@ class Elevation(nn.Module):
         self.ele_values = ele_values.reshape(1, self.num_classes, 1, 1)
         
         self.patch2feat = True
+        # Upsampler choice: 'patch2feature' (DPT-style, multi-stage fusion) or 'dino' (DinoUpsampler).
+        self.upsampler_kind = 'patch2feature'
         # Replace efficientnet_feature with DINOv2 backbone
         self.patchsize = int(14)
+        self._pca_viz_done = False
         if 'DepthAnything3' in backbone :
             model = DepthAnything3.from_pretrained("depth-anything/DA3-SMALL")
             #print("model_depthAnything3", model)
@@ -433,10 +495,16 @@ class Elevation(nn.Module):
             ##print("encoder", encoder)
             self.feature_extraction = encoder
             if self.patch2feat:
-                self.transition_layer = patch2feature(embed_dim=768, patch_size=14, output_dim = pred_dim,
-                                                      out_channels = [48, 96, 192, 384])
+                self.transition_layer = patch2feature(
+                        embed_dim=768, patch_size=14, output_dim=pred_dim,
+                        out_channels=(48, 96, 192, 384),
+                    )
             else:
-                self.transition_layer = easy_transition_layer(embed_dim=768, patch_size=14, out_channels = pred_dim)
+                self.transition_layer = DinoUpsampler(
+                    embed_dim=768, patch_size=14,
+                    output_dim=pred_dim, num_layers=4,
+                    upsample_factor=4,
+                )
             self.feat_channel = pred_dim
         
         else:
@@ -492,11 +560,12 @@ class Elevation(nn.Module):
     def forward(self, imgs_left, proj_index_left, *args):
         # proj_index: [num_samples, 2, num_grids_z*num_grids_x*num_grids_y]
         if 'DepthAnything3' in self.backbone:
-            with torch.no_grad():
+            encoder_ctx = nullcontext() if self.train_encoder else torch.no_grad()
+            with encoder_ctx:
            #print("start feature extraction with DepthAnything3 backbone")
             # add a dimension to input image
                 B, C, W, H = imgs_left.shape
-                imgs_left = imgs_left.unsqueeze(1) # [B, 1, C, H, W] 
+                imgs_left = imgs_left.unsqueeze(1) # [B, 1, C, H, W]
                 #imgs_left = imgs_left.transpose(-2, -1)
                 print("me", imgs_left.shape)
                 features, _ = self.feature_extraction(imgs_left)  #tuple of pair of feautures (patch embed and 1dfeature vector)
@@ -505,7 +574,11 @@ class Elevation(nn.Module):
                 features = [feat[0].reshape(B*S, N, C) for feat in features]
                 #make_pca(features[-1].transpose(-1, -2).reshape(B*S, C, int(W/14), int(H/14)), "pca_before_projection.png", 768)
                 #print_types(features)
-        
+                # if not self._pca_viz_done:
+                #     visualize_encoder_pca(features, "pca_dino_encoder.png",
+                #                           patch_size=self.patchsize, img_hw=(W, H), layer_idx=-1)
+                #     self._pca_viz_done = True
+
             if self.patch2feat:
                 features_left = self.transition_layer(features, W, H, int(W/4), int(H/4))   #B*S, C, 952, 518
             else:
@@ -516,8 +589,12 @@ class Elevation(nn.Module):
            #print("start feature extraction with EfficientNet backbone")
             features_left = self.feature_extraction(imgs_left)
             #print("Extracted features shape:", features_left.shape)
-            
+            # if not self._pca_viz_done:
+            #     visualize_encoder_pca(features_left, "pca_efficientnet_encoder.png")
+            #     self._pca_viz_done = True
+
         B, C, H, W = features_left.shape
+        self._last_features = features_left.detach()
         features_left = features_left.reshape(B, C, -1)
         linear_indices = proj_index_left[:, 1, :] * W + proj_index_left[:, 0, :]
 
@@ -643,7 +720,7 @@ class DinoV2SpatialDecoder(nn.Module):
 
             # tokens → feature map
             x = x.permute(0, 2, 1).reshape(B, C, ph, pw) # [B, C, ph, pw]
-            save_feature_map(x[0, 0, :, :], f"patch_viz {stage_idx} .png" )
+            # save_feature_map(x[0, 0, :, :], f"patch_viz {stage_idx} .png" )
             # project channels
             x = self.projects[stage_idx](x) # [B, out_channels, ph, pw]
 
@@ -663,7 +740,7 @@ class DinoV2SpatialDecoder(nn.Module):
         fused = torch.stack(resized_feats, dim=0) # [4, B, out_channels, H, W]
         fused = fused.sum(dim=0)
         fused = self.fuse(fused) 
-        save_feature_map(fused[0, 0, :, :], "fused_feature_map.png")
+        # save_feature_map(fused[0, 0, :, :], "fused_feature_map.png")
        #print("fused after conv shape:", fused.shape) #[B, out_channels, H, W]
        #print("Fused feature map border values:", fused[0, :, 0, :], fused[0, :, -1, :])
         return fused
