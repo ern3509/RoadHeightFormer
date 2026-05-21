@@ -227,7 +227,23 @@ def train_regression():
                         ele_pred = model(imgs_left, proj_index_left)
 
                         #print("train ele pred shape:", ele_pred.shape)
-                    
+                    if i == 0:
+                        try:
+                            model.eval()
+                            with torch.no_grad():
+                                _ = model(train_imgs_fixed[:1].cuda(), train_proj_fixed[:1].cuda())
+                            model.train()
+                            rgb = visualize_encoder_pca(
+                                model._last_features,
+                                f"/tmp/pca_encoder_epoch{epoch_idx+1}.png",
+                            )
+                            wandb.log(
+                                {"train/encoder_features_pca": wandb.Image(
+                                    rgb, caption=f"epoch {epoch_idx+1} (fixed sample 0)")},
+                                step=global_step,
+                            )
+                        except Exception as e:
+                            print(f"[pca log] skipped: {e}")
 
                     loss_all = loss_func(ele_pred, ele_gt, ele_mask)
 
@@ -251,28 +267,11 @@ def train_regression():
                         ele_pred_fixed = unnormalize(ele_pred_fixed, h_min, h_max)
                         print("max and min after normalization:", ele_pred_fixed.max().item(), ele_pred_fixed.min().item())
 
-                if i == 0:
-                        try:
-                            model.eval()
-                            with torch.no_grad():
-                                _ = model(train_imgs_fixed[:1].cuda(), train_proj_fixed[:1].cuda())
-                            model.train()
-                            rgb = visualize_encoder_pca(
-                                model._last_features,
-                                f"/tmp/pca_encoder_epoch{epoch_idx+1}.png",
-                            )
-                            wandb.log(
-                                {"train/encoder_features_pca": wandb.Image(
-                                    rgb, caption=f"epoch {epoch_idx+1} (fixed sample 0)")},
-                                step=global_step,
-                            )
-                        except Exception as e:
-                            print(f"[pca log] skipped: {e}")
             #/****logging ***********************
                 print("logging step:", global_step, args.summary_freq)
                 if global_step % args.summary_freq == 0: 
                     model.eval()
-                    with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float16):
+                    with torch.no_grad():
                         ele_pred_fixed = model(train_imgs_fixed.cuda(), train_proj_fixed.cuda())
                     
                         log_dict = {}
@@ -298,9 +297,8 @@ def train_regression():
                             wandb.log({"train/combined_sample_" + str(s): combined_img}, step=global_step)
 
                         logged_train_static = True
-                    del ele_pred_fixed
-                    torch.cuda.empty_cache()
                     model.train()
+                    torch.cuda.empty_cache()
                     #wandb.log(log_dict, step=global_step)
                 scaler.scale(loss_all).backward()
                 scaler.unscale_(optimizer)
@@ -379,8 +377,17 @@ def train_regression():
         time_epoch_end = time.time() - time_epoch
         wandb.log({"epoch/epoch_duration": time_epoch_end}, step=global_step)
         wandb.log({"epoch/epoch": epoch_idx+1}, step=global_step)
-        
+
         last_epoch = epoch_idx + 1
+
+    # Final checkpoint after all epochs finish.
+    final_path = "{}/final_{}_epoch{:0>2}_{:0>6}.pt".format(
+        args.logdir, args.name_run.strip() or "run", last_epoch, global_step)
+    torch.save({"model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": last_epoch,
+                "steps": global_step}, final_path)
+    print(f"[final ckpt] saved {final_path}")
     run.finish()
 @make_nograd_func
 def test_sample_regression(test_loader, global_step, run, logged_eval_static):
@@ -393,9 +400,8 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
     total_error = 0.0
     total_valid_pixels = 0
     #save file for visualization pytorch
-    with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float16):
-        ele_pred_fixed = model(eval_imgs_fixed.cuda(), eval_proj_fixed.cuda())
     with torch.no_grad():
+        ele_pred_fixed = model(eval_imgs_fixed.cuda(), eval_proj_fixed.cuda())
         for s in range(len(fixed_eval_indices)):
             if args.normalize:
                 print("undo normalization in visualization of some testing sample")
@@ -421,7 +427,6 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
                             test=True
                             )
             wandb.log({"test/combined_sample_" + str(s): combined_img}, step=global_step)
-        del ele_pred_fixed
         logged_eval_static = True
         for i, sample in enumerate(test_loader):
             if args.stereo:
@@ -437,7 +442,7 @@ def test_sample_regression(test_loader, global_step, run, logged_eval_static):
                     ele_pred = model(imgs_left, proj_index_left, imgs_right, proj_index_right)
                 else:
                     ele_pred = model(imgs_left, proj_index_left)
-                    #ele_pred_fixed = model(eval_imgs_fixed, eval_proj_fixed)
+                    #ele_pred_fixed = model(eval_imgs_fixed.cuda(), eval_proj_fixed.cuda())
                     #ele_pred = ele_pred[:, 0, :, :] #from B, 2, H, W to B, H, W
                     #ele_pred_fixed = ele_pred_fixed[:, 0, :, :]
                 
@@ -539,6 +544,9 @@ def train():
                             )
                         except Exception as e:
                             print(f"[pca log] skipped: {e}")
+                        finally:
+                            model.train()
+
                     loss_all = loss_func(ele_pred, ele_gt, ele_mask)
                     #metric for evaluation
                     ele_mask_roi = torch.logical_and(ele_gt > -ele_range, ele_gt < ele_range)
@@ -556,8 +564,8 @@ def train():
                 if global_step % args.summary_freq == 0: 
                     log_dict = {}
                     model.eval()
-                    with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float16):
-                        ele_pred_fixed = model(train_imgs_fixed, train_proj_fixed)
+                    with torch.no_grad():
+                        ele_pred_fixed = model(train_imgs_fixed.cuda(), train_proj_fixed.cuda())
                     for s in range(len(fixed_train_indices)):
                         if not logged_train_static:
                             gt_vmin[s], gt_vmax[s] = get_percentile_bounds(
@@ -647,6 +655,15 @@ def train():
             if early_stopping.should_stop:
                 print("Early stopping triggered!")
                 break
+
+    # Final checkpoint after all epochs finish (or after early stop).
+    final_path = "{}/final_{}_epoch{:0>2}_{:0>6}.pt".format(
+        args.logdir, args.name_run.strip() or "run", epoch_idx + 1, global_step)
+    torch.save({"model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": epoch_idx + 1,
+                "steps": global_step}, final_path)
+    print(f"[final ckpt] saved {final_path}")
     run.finish()
 @make_nograd_func
 def test_sample(test_loader, global_step, run, logged_eval_static=False):
@@ -703,6 +720,8 @@ def test_sample(test_loader, global_step, run, logged_eval_static=False):
             else:
                 ele_pred = model(imgs_left, proj_index_left)
             metric.compute(ele_pred, ele_gt, ele_mask)
+            #print("youuuu", ele_pred.shape, ele_gt.shape)
+            #ele_pred = torch.tensor(ele_pred.unsqueeze(dim=0))
 
             abs_error = torch.abs(
                 ele_pred - ele_gt
@@ -714,11 +733,12 @@ def test_sample(test_loader, global_step, run, logged_eval_static=False):
             total_valid_pixels += ele_mask.sum().item()
             del ele_pred, imgs_left, ele_gt, ele_mask, proj_index_left
 
+
     model.train()
     torch.cuda.empty_cache()
     metric_values = metric.get_metric()
     metric.clear()
-    eval_loss = total_error/len(test_loader) 
+    eval_loss = total_error/len(test_loader)
 
     return metric_values, eval_loss
 
@@ -901,10 +921,11 @@ def wandb_rgb_image(img, caption):
 def get_fixed_samples(dataset, indices):
     samples = [dataset[i] for i in indices]
     print("fetch from visual")
-    imgs = torch.stack([s[0] for s in samples])    # kept on CPU
+    imgs = torch.stack([s[0] for s in samples])
     ele_gt = torch.stack([s[1] for s in samples])
     ele_mask = torch.stack([s[2] for s in samples])
     proj_idx = torch.stack([s[3] for s in samples])
+
     return imgs, ele_gt, ele_mask, proj_idx
 
 def denormalize(img, mean, std):
@@ -1012,15 +1033,28 @@ if __name__ == '__main__':
     parser.add_argument('--load_pt', default=None, help='load weights, optimizer, start_idx to resume run')
     parser.add_argument('--dino', default="small", help='ViT encoder size')
     parser.add_argument('--clamp_gt', action='store_true', help='if set, clamp GT elevation values to [-y_range*100, y_range*100] cm in the dataloader (in addition to the existing ROI mask filtering)')
-    parser.add_argument('--crop_to_road', action='store_true', help='if set, the dataloader crops each image to the bbox of the projected voxel ROI (+10% padding), resizes back to 560x560, and adjusts the intrinsic / voxel_uv accordingly. Preprocessed cache must be regenerated when toggling this flag.')
+    parser.add_argument('--crop_to_road', action='store_true', help='if set, the dataloader crops each image to a bbox, resizes down to size which are % 14 to match the dino patchsize, and adjusts the intrinsic / voxel_uv accordingly.')
     parser.add_argument('--train_encoder', action='store_true', help='if set, the DepthAnything3 backbone runs without torch.no_grad() so its weights are updated during training (default: encoder is frozen).')
+    parser.add_argument('--w_pixel', type=float, default=0.3, help='composite loss: pixel term weight')
+    parser.add_argument('--w_gradient', type=float, default=1.0, help='composite loss: gradient term weight')
+    parser.add_argument('--w_structure', type=float, default=0.0, help='composite loss: SSIM-like structural term weight')
+    parser.add_argument('--w_normal', type=float, default=1.0, help='composite loss: surface-normal term weight')
+    parser.add_argument('--w_smoothness', type=float, default=0.0, help='composite loss: edge-aware smoothness term weight')
+    parser.add_argument('--dinov2_layers', type=int, nargs='+', default=[5, 7, 9, 11], help='which DINOv2 transformer block indices to extract intermediate features from (used by --backbone DINOv2_fb).')
+    parser.add_argument('--upsampler_kind', type=str, default='patch2feature', choices=['patch2feature', 'dino'], help='which upsampler to plug after the DINOv2 encoder: patch2feature (DPT-style multi-stage fusion) or dino (DinoUpsampler).')
+    parser.add_argument('--pixel_type', type=str, default='MSE', choices=['L1', 'MSE'], help='pixel-term loss inside CompositeLoss: L1 or MSE.')
 
     # parse arguments, set seeds
-    # args = parse_args_with_config()
-    # print(f"DEBUG: Config file: {args.config}")
-    # print(f"DEBUG: Dataset: {args.dataset}")
-    # print(f"DEBUG: Batch size: {args.batch_size}")
-    args = parser.parse_args()
+    # Config-driven path: parse_args_with_config() builds its own parser inside utils/config.py
+    # (kept in sync with the parser above) and overlays values from the YAML file passed via
+    # --config. Run as: python train.py --config configs/<your_config>.yaml
+    args = parse_args_with_config()
+    print(f"[config] file:       {args.config}")
+    print(f"[config] dataset:    {args.dataset}")
+    print(f"[config] backbone:   {args.backbone}")
+    print(f"[config] batch_size: {args.batch_size}")
+    print(f"[config] epochs:     {args.epochs}")
+    # args = parser.parse_args()
     torch.backends.cudnn.enable = True
     torch.backends.cudnn.benchmark = True
     #os.environ['CUDA_VISIBLE_DEVICES'] = '0'
@@ -1038,32 +1072,49 @@ if __name__ == '__main__':
         print('training RoadBEV-mono!')
 
     # dataset, dataloader
+    voxel_kwargs = {'y_range': getattr(args, 'y_range', None),
+                    'num_grids_y': getattr(args, 'num_grids_y', None)}
+
     if 'RSRD' in args.dataset:
-        train_set = RSRD(training=True, stereo=args.stereo, down_scale=args.down_scale)
-        test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
+        train_set = RSRD(training=True, stereo=args.stereo, down_scale=args.down_scale, backbone=args.backbone)
+        test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale, backbone=args.backbone)
 
     elif 'CARDSetV2Small' in args.dataset:
-        test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
-        train_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
+        test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road, **voxel_kwargs)
+        train_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road, **voxel_kwargs)
         # Batch size and summary_freq now come from config file, not hardcoded here
         args.batch_size = 1
         args.summary_freq = 1
         args.epochs = 20
+
+    elif 'CARDSet_y04_g40_square' in args.dataset:
+        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/train_dataset_y0.4_g40_square.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = False, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road, **voxel_kwargs)
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_dataset_y0.4_g40_square.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = False, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road, **voxel_kwargs)
+        train_set.preprocessed_dir = '/data/rhf/train_preprocessed_data_y0.4_g40_square'
+        test_set.preprocessed_dir = '/data/rhf/val_preprocessed_data_y0.4_g40_square'
+    elif 'CARDSetSmall_cropped' in args.dataset:
+        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/train_small_dataset_thesis_cropped.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = False, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road, **voxel_kwargs)
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_small_dataset_thesis_cropped.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = False, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road, **voxel_kwargs)
+        train_set.preprocessed_dir = '/data/rhf/train_preprocessed_small_data_thesis_cropped'
+        test_set.preprocessed_dir = '/data/rhf/val_preprocessed_small_data_thesis_cropped'
     elif 'CARDSetSmall' in args.dataset:
-        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/train_small_dataset_thesis.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = False, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
-        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_small_dataset_thesis.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = False, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
+        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/train_small_dataset_thesis.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = False, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road, **voxel_kwargs)
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_small_dataset_thesis.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed, augmentation = False, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road, **voxel_kwargs)
         train_set.preprocessed_dir = '/data/rhf/train_preprocessed_small_data_thesis'
         test_set.preprocessed_dir = '/data/rhf/val_preprocessed_small_data_thesis'
 
     elif 'CARDSet' in args.dataset:
-        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/train_all_data_clean_NN_RHF.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
-        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
+        train_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/train_all_data_clean_NN_RHF.txt', mode='train', down_scale=args.down_scale, preprocessed_data = args.preprocessed, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road, **voxel_kwargs)
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='test', down_scale=args.down_scale, preprocessed_data = args.preprocessed, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road, **voxel_kwargs)
         train_set.preprocessed_dir = '/data/rhf/train_preprocessed_data'
         test_set.preprocessed_dir = '/data/rhf/val_preprocessed_data'
     else:
         print('unknown dataset!')
         exit(0)
 
+    print(f"[dataset] preprocessed       : {args.preprocessed}")
+    print(f"[dataset] train preprocessed_dir: {getattr(train_set, 'preprocessed_dir', '<not set>')}")
+    print(f"[dataset] test  preprocessed_dir: {getattr(test_set,  'preprocessed_dir', '<not set>')}")
 
     # IDENTICAL LOADERS FOR DEBUG: both use same data, batch size, and workers
     train_loader = DataLoader(train_set, args.batch_size, shuffle=True, num_workers=8, drop_last=True, pin_memory=False)
@@ -1087,12 +1138,15 @@ if __name__ == '__main__':
     ele_range = train_set.y_range
     voxel_ele_res = train_set.grid_res[1]
     num_grids = [train_set.num_grids_x, train_set.num_grids_y, train_set.num_grids_z]
-    if args.dataset != "RSRD":
-        hori_centers = train_set.hori_centers.to(device) #B, H, W, 2 [0->x, 1->z]
+    hori_centers = train_set.hori_centers.to(device) #B, H, W, 2 [0->x, 1->z]
 
 
     Elevation = ElevationDinoV2FB if 'DINOv2_fb' in args.backbone else ElevationDA3
-    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize, args.pred_head_dim, train_encoder=args.train_encoder).cuda() #, args.dino
+    extra_kwargs = {}
+    if 'DINOv2_fb' in args.backbone:
+        extra_kwargs['dinov2_layers'] = tuple(args.dinov2_layers)
+        extra_kwargs['upsampler_kind'] = args.upsampler_kind
+    model = Elevation(args.stereo, num_grids, ele_range, args.cla_res, args.regression, args.backbone, args.normalize, args.pred_head_dim, train_encoder=args.train_encoder, **extra_kwargs).cuda() #, args.dino
     early_stopping = EarlyStopping(patience=300, min_delta=0.001)
     print('num params:', sum(p.numel() for p in model.parameters() if p.requires_grad))
     print(model)
@@ -1122,12 +1176,12 @@ if __name__ == '__main__':
         elif args.loss == 'composite':
             loss_func = CompositeLoss(
                 ele_range, hori_centers=hori_centers, normalize=args.normalize,
-                pixel_type='MSE',
-                w_pixel=0.3,      # primary supervision
-                w_gradient=1,   # Step 1: gradient is the key addition
-                w_structure=0.0,  # Step 3: enable at 0.5
-                w_normal=1,     # Step 4: enable at 0.1
-                w_smoothness=0.0, # Step 2: enable at 0.1
+                pixel_type=args.pixel_type,
+                w_pixel=args.w_pixel,
+                w_gradient=args.w_gradient,
+                w_structure=args.w_structure,
+                w_normal=args.w_normal,
+                w_smoothness=args.w_smoothness,
             ).cuda()
         else:
             loss_func = MSE_normal_loss(ele_range, hori_centers=hori_centers, normalize=args.normalize).cuda()

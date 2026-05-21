@@ -121,6 +121,11 @@ if __name__ == '__main__':
     if 'CARDSetV2Small' == args.dataset:
         test_set = CARDSetDatasetV2Smalldataset(root_dir='CARDSet/CARD_nice', mode='test', down_scale=args.down_scale, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
 
+    elif 'CARDSet_y04_g40_square' == args.dataset:
+        print("Preprocessed dataset y0.4 g40 square")
+        test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_dataset_y0.4_g40_square.txt', mode='test', down_scale=args.down_scale, preprocessed_data=args.preprocessed, augmentation=False, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
+        test_set.preprocessed_dir = '/data/rhf/val_preprocessed_data_y0.4_g40_square'
+
     elif 'CARDSetSmall' == args.dataset:
         print("Small preprocessed (thesis) dataset")
         test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/rhf/val_small_dataset_thesis.txt', mode='test', down_scale=args.down_scale, preprocessed_data=args.preprocessed, augmentation=False, clamp_gt=args.clamp_gt, crop_to_road=args.crop_to_road)
@@ -131,7 +136,7 @@ if __name__ == '__main__':
         #test_set = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/RoadHeightFormer_test.txt', mode='test', down_scale=args.down_scale)
     
     elif 'RSRD' == args.dataset:
-        test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale)
+        test_set = RSRD(training=False, stereo=args.stereo, down_scale=args.down_scale, backbone=args.backbone)
 
     else:
         print("unknown dataset")
@@ -166,7 +171,10 @@ if __name__ == '__main__':
     model.load_state_dict(state_dict, strict=True)
 
     [metric_all, metric_depthwise] = test_sample(test_loader)
-    info = 'test:    abs_err:%.3f, rmse:%.3f, >0.5cm:%.2f' % (metric_all[0], metric_all[1], metric_all[2]*100)
+    info = ('test:    abs_err:%.3f, rmse:%.3f, >0.5cm:%.2f%%, >0.1cm:%.2f%%, '
+            '>1.0cm:%.2f%%, le90:%.3f, grad_err:%.4f') % (
+        metric_all[0], metric_all[1], metric_all[2]*100,
+        metric_all[3]*100, metric_all[4]*100, metric_all[5], metric_all[6])
     print(info)
 
     #metric.plot_depthwise(metric_depthwise)

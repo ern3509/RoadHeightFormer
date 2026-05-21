@@ -167,10 +167,16 @@ class patch2feature(nn.Module):
     
     def forward(self, feats: List[torch.Tensor],
                 H: int,
-                W: int, 
+                W: int,
                 h_out,
                 w_out,
                 patch_start_idx: int = 0) -> torch.Tensor:
+        # If only one intermediate feature was provided (e.g. dinov2_layers=[11]),
+        # broadcast it to 4 streams so the four stage projections / resizes /
+        # adapters can run unchanged. DINOv2's get_intermediate_layers rejects
+        # duplicate indices, so the duplication is done here on the consumer side.
+        if len(feats) == 1:
+            feats = [feats[0]] * 4
         #print("len feats", len(feats))
         #print("featshape", feats[0].shape)
         B, _, C = feats[0].shape

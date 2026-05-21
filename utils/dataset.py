@@ -2,21 +2,31 @@ import numpy as np
 import math
 import pickle
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import os
 import PIL.Image
 from torchvision import transforms
 import open3d as o3d
 import copy, cv2
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from RSRD_dev_toolkitmain.cam_extrinsic import Extrinsic
 
 class RSRD(Dataset):
-    def __init__(self, training=True, stereo=False, down_scale=2):
+    def __init__(self, training=True, stereo=False, down_scale=2, backbone=None):
         super(RSRD, self).__init__()
         self.training = training
         self.stereo = stereo
         self.down_scale = down_scale
+        self.backbone = backbone or ''
+        # RHF / DINOv2 backbones use a ViT with patch_size=14, which requires
+        # both image dimensions to be divisible by 14. RSRD's native crop is
+        # 960x528 (neither dim is %14), so we right/bottom-pad on the fly.
+        self.is_rhf = 'DINOv2' in self.backbone
+        if self.is_rhf:
+            self.rhf_pad_stride = 14 * self.down_scale // math.gcd(14, self.down_scale)
 
         self.calib_path = 'calibration_files'  # path for calibration files
         # path for training set of RSRD-dense. Both the train and test sets in this work are from the train set of RSRD-dense
@@ -53,7 +63,7 @@ class RSRD(Dataset):
         hori_centers[:, :, 1] = (-torch.arange(self.num_grids_z) * self.grid_res[2] + self.roi_z[1] - self.grid_res[2]/2).unsqueeze(1).repeat([1, self.num_grids_x])
         self.map_centers = hori_centers.reshape(-1, 2)
         self.num_center = self.map_centers.shape[0]
-
+        self.hori_centers = hori_centers
         # generate the centers of every 3D voxel
         voxel_centers = torch.zeros((self.num_grids_z, self.num_grids_x, self.num_grids_y, 3), dtype=torch.float32)
         voxel_centers[:, :, :, [0, 2]] = hori_centers.unsqueeze(2).repeat([1, 1, self.num_grids_y, 1])
@@ -86,6 +96,22 @@ class RSRD(Dataset):
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # [0, 1] --> [-1, 1]
         ])
 
+    def _pad_for_rhf(self, img):
+        """Right/bottom-pad a [C, H, W] tensor so H and W are multiples of
+        lcm(14, down_scale). Padding (vs. resize) preserves the intrinsics, so
+        K_feat_T and the precomputed voxel_uv projections remain valid — the
+        original image content stays at the top-left and padded pixels lie
+        outside the road ROI."""
+        if not self.is_rhf:
+            return img
+        s = self.rhf_pad_stride
+        _, H, W = img.shape
+        pad_h = (s - H % s) % s
+        pad_w = (s - W % s) % s
+        if pad_h == 0 and pad_w == 0:
+            return img
+        return F.pad(img, (0, pad_w, 0, pad_h), mode='constant', value=0.0)
+
     def load_dataset_names(self, sample_path):
         data_all = []
         files = sorted(os.listdir(sample_path))
@@ -94,7 +120,7 @@ class RSRD(Dataset):
                 data = pickle.load(f)
             data_all += data
         self.data_all = data_all
-        print(f"Total number of samples loaded: {len(self.data_all)}")
+        # print(f"Total number of samples loaded: {len(self.data_all)}")
 
     def get_lidar2cam(self, date_stamp):
         # name in format: 20230408023213.400
@@ -149,8 +175,8 @@ class RSRD(Dataset):
         xyz = np.asarray(xyz.points)
         N, _ = xyz.shape
         points_y = xyz[:, 1]*100  # points, m --> cm
-        print(xyz[:, 1].max(), xyz[:, 1].min())
-        print(points_y.mean())
+        # print(xyz[:, 1].max(), xyz[:, 1].min())
+        # print(points_y.mean())
         points_xz = xyz[:, [0, 2]]
         grids_y = torch.zeros((self.num_grids_z, self.num_grids_x), dtype=torch.float32)
         grids_count = torch.zeros((self.num_grids_z, self.num_grids_x), dtype=torch.int32)  # int8 overflows at 127 with dense point clouds
@@ -200,7 +226,7 @@ class RSRD(Dataset):
 
         ########   calculate the euler angles of the camera (relative to local ENU coord)   ########
         R_cur2enu = self.get_RT_lidar(sample_cur)
-        print("aaaaa", np.linalg.inv(R_cur2enu))
+        # print("aaaaa", np.linalg.inv(R_cur2enu))
         [pitch_cam, roll_cam, _] = self.matrix2euler(l2c_calib_cur['R'] @ np.linalg.inv(R_cur2enu))
         pitch_cam -= 1.5708  # pi/2
         R_X = np.array(
@@ -222,14 +248,14 @@ class RSRD(Dataset):
         ######   create the GT elevation map  ########
         #import pdb; pdb.set_trace()
         ele_gt, ele_mask = self.get_gt_preprocessed(sample_cur['time'])
-        print(ele_gt.shape, ele_gt[:, 1])
+        # print(ele_gt.shape, ele_gt[:, 1])
 
         
 
         ##########  read the RGB images   ############
         path_img = os.path.join(self.data_path, path_base, 'left_half', sample_cur['time']) + '.jpg'
         img = PIL.Image.open(path_img).crop((0, 0, 960, 528))
-        imgs_left = self.transform_jpg(img)
+        imgs_left = self._pad_for_rhf(self.transform_jpg(img))
         #print("mbou", imgs_left.shape)
 
         voxel_cam_left = R_vert2cam @ self.voxel_centers
@@ -245,25 +271,146 @@ class RSRD(Dataset):
 
             path_img = os.path.join(self.data_path, path_base, 'right_half', sample_cur['time']) + '.jpg'
             img = PIL.Image.open(path_img).crop((0, 0, 960, 528))
-            imgs_right = self.transform_jpg(img)
+            imgs_right = self._pad_for_rhf(self.transform_jpg(img))
 
             return imgs_left, imgs_right, ele_gt, ele_mask, voxel_uv_left, voxel_uv_right, sample_cur['time']
         else:
             uvz_left = l2c_calib_cur['K_feat_T'] @ voxel_cam_left
             voxel_uv_left = torch.floor(uvz_left[:2, :] / uvz_left[2:, :]).type(torch.long)
+
+            # Validate voxel projections are within camera frustum
+            feat_H = 528 // self.down_scale
+            feat_W = 960 // self.down_scale
+            
+            # Check validity before clamping
+            valid_mask = (voxel_uv_left[0] >= 0) & (voxel_uv_left[0] < feat_W) & \
+                        (voxel_uv_left[1] >= 0) & (voxel_uv_left[1] < feat_H)
+
+            valid_ratio = valid_mask.sum().item() / valid_mask.numel()
+            if valid_ratio < 0.7 or index < 3:  # Always visualize first 3 samples + failures
+                # ── Frustum debug visualization ───────────────────────────
+                os.makedirs("frustum_debug", exist_ok=True)
+                tag = f"rsrd_idx{index}_ts{sample_cur['time']}"
+
+                u = voxel_uv_left[0].numpy()
+                v = voxel_uv_left[1].numpy()
+
+                fig, axes = plt.subplots(1, 4, figsize=(32, 7))
+
+                # 1) UV scatter
+                ax = axes[0]
+                ax.scatter(u[valid_mask.numpy()], v[valid_mask.numpy()],
+                           s=0.3, alpha=0.3, c='green', label='in-frustum')
+                ax.scatter(u[~valid_mask.numpy()], v[~valid_mask.numpy()],
+                           s=0.3, alpha=0.3, c='red', label='out-of-frustum')
+                ax.axhline(0, color='blue', ls='--', lw=0.8)
+                ax.axhline(feat_H - 1, color='blue', ls='--', lw=0.8, label=f'feat_H={feat_H}')
+                ax.axvline(0, color='blue', ls='--', lw=0.8)
+                ax.axvline(feat_W - 1, color='blue', ls='--', lw=0.8, label=f'feat_W={feat_W}')
+                ax.set_xlabel('u (px)')
+                ax.set_ylabel('v (px)')
+                ax.set_title(f'Voxel UV projections — {valid_ratio*100:.1f}% valid')
+                ax.legend(markerscale=10, fontsize=8)
+                ax.invert_yaxis()
+
+                # 2) Overlay on image with distance lines
+                ax = axes[1]
+                img_np = np.array(img)
+                ax.imshow(img_np)
+                scale = self.down_scale
+                ax.scatter(u[valid_mask.numpy()] * scale, v[valid_mask.numpy()] * scale,
+                           s=0.2, alpha=0.2, c='lime')
+                ax.scatter(u[~valid_mask.numpy()] * scale, v[~valid_mask.numpy()] * scale,
+                           s=0.2, alpha=0.2, c='red')
+                # Draw distance reference lines on the image
+                K_ds = l2c_calib_cur['K_feat_T'].numpy()
+                for z_ref in [2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20]:
+                    v_line = K_ds[1, 1] * self.base_height / z_ref + K_ds[1, 2]
+                    v_img = v_line * scale
+                    if 0 <= v_img < img_np.shape[0]:
+                        ax.axhline(v_img, color='yellow', ls='-', lw=0.6, alpha=0.7)
+                        ax.text(5, v_img - 3, f'{z_ref}m', color='yellow', fontsize=7,
+                                fontweight='bold', bbox=dict(boxstyle='round,pad=0.1',
+                                facecolor='black', alpha=0.5))
+                ax.set_title('Projections on image + distance lines')
+                ax.axis('off')
+
+                # 3) Overlay on unsqueezed image
+                ax = axes[2]
+                img_unsqueezed = img.resize((528, 528))  # make it square
+                img_unsq_np = np.array(img_unsqueezed)
+                ax.imshow(img_unsq_np)
+                # Scale u,v from feature-map to unsqueezed image coords
+                u_unsq = u * scale * (528.0 / 960.0)  # rescale horizontal
+                v_unsq = v * scale  # vertical stays same
+                valid_np = valid_mask.numpy()
+                ax.scatter(u_unsq[valid_np], v_unsq[valid_np],
+                           s=0.2, alpha=0.3, c='lime')
+                ax.scatter(u_unsq[~valid_np], v_unsq[~valid_np],
+                           s=0.2, alpha=0.3, c='red')
+                for z_ref in [2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20]:
+                    v_line = K_ds[1, 1] * self.base_height / z_ref + K_ds[1, 2]
+                    v_img = v_line * scale
+                    if 0 <= v_img < 528:
+                        ax.axhline(v_img, color='yellow', ls='-', lw=0.6, alpha=0.7)
+                        ax.text(5, v_img - 3, f'{z_ref}m', color='yellow', fontsize=7,
+                                fontweight='bold', bbox=dict(boxstyle='round,pad=0.1',
+                                facecolor='black', alpha=0.5))
+                ax.set_title('Unsqueezed + distance lines')
+                ax.axis('off')
+
+                # 4) Histogram of v-coordinates
+                ax = axes[3]
+                ax.hist(v, bins=200, color='steelblue', edgecolor='none')
+                ax.axvline(0, color='red', ls='--', label='v=0')
+                ax.axvline(feat_H - 1, color='red', ls='--', label=f'v={feat_H-1}')
+                ax.set_xlabel('v (feature-map px)')
+                ax.set_ylabel('count')
+                ax.set_title('v-coordinate distribution')
+                ax.legend(fontsize=8)
+
+                plt.suptitle(f'{path_img}\n'
+                             f'K={l2c_calib_cur["K"].tolist()}\n'
+                             f'roi_z=[{self.roi_z[0]:.2f}, {self.roi_z[1]:.2f}], '
+                             f'base_h={self.base_height:.3f}m\n'
+                             f'Original image: 960x528 cropped'
+                             , fontsize=8)
+                plt.tight_layout()
+                # plt.savefig(f"frustum_debug/{tag}.png", dpi=150)
+                plt.close()
+
+                # print(f"[FRUSTUM DEBUG RSRD] saved frustum_debug/{tag}.png  "
+                #       f"valid={valid_ratio*100:.1f}%  "
+                #       f"v range=[{v.min()}, {v.max()}]  "
+                #       f"u range=[{u.min()}, {u.max()}]  "
+                #       f"feat={feat_W}x{feat_H}")
+
+            if valid_ratio < 0.7:
+                raise ValueError(
+                    f"RSRD: Only {valid_mask.sum()}/{valid_mask.numel()} "
+                    f"({valid_ratio*100:.1f}%) voxels project within camera frustum. "
+                    f"Feature map size: {feat_W}x{feat_H}, "
+                    f"UV range: [{u.min()},{u.max()}] x [{v.min()},{v.max()}]. "
+                    f"See frustum_debug/{tag}.png "
+                    f"Data path: {path_img}")
+            
+            # Clamp to be safe
+            voxel_uv_left[0] = voxel_uv_left[0].clamp(0, feat_W - 1)
+            voxel_uv_left[1] = voxel_uv_left[1].clamp(0, feat_H - 1)
+
             if index == 0:
-                print(f"elevation{ele_gt.shape}")
-                print("image shape", imgs_left.shape)
-                print(voxel_uv_left.shape)
-                print(sample_cur['time'])
+                # print(f"elevation{ele_gt.shape}")
+                # print("image shape", imgs_left.shape)
+                # print(voxel_uv_left.shape)
+                # print(sample_cur['time'])
 
                 T_l2c = l2c_calib_cur['T']
                 R_l2c = l2c_calib_cur['R']
                 extrinsic_matrix = np.eye(4, dtype=np.float32)
                 extrinsic_matrix[:3, :3] = R_l2c
                 extrinsic_matrix[:3, 3] = T_l2c.flatten()
-                print(extrinsic_matrix)
-                print(self.calib_params_all['20230317']['K_feat_T'])
+                # print(extrinsic_matrix)
+                # print(self.calib_params_all['20230317']['K_feat_T'])
                 #draw_voxel_bounding_boxes(path_img, self.voxel_centers, torch.Tensor(self.calib_params_all['20230317']['K_feat_T']), torch.Tensor(extrinsic_matrix), self.down_scale )
 
 
@@ -275,9 +422,9 @@ class RSRD(Dataset):
             
             #print("God", R_cam2vert)
             cloud_camvert = cloud.rotate(R_cam2vert, center=(0, 0, 0))
-            self.save_gt_as_image(cloud_camvert, path_img, self.calib_params_all['20230317']['K'], " " , index)
-            points = np.array(cloud_camvert.points)
-            print(f"Height after transformation values (y): min={points[:, 1].min()}, max={points[:, 1].max()}")
+            # self.save_gt_as_image(cloud_camvert, path_img, self.calib_params_all['20230317']['K'], " " , index)
+            # points = np.array(cloud_camvert.points)
+            # print(f"Height after transformation values (y): min={points[:, 1].min()}, max={points[:, 1].max()}")
 
             #self.save_gt_points(cloud_camvert)
             crop_bounding = np.array([[self.roi_x[0], 0, self.roi_z[0]],
@@ -294,9 +441,9 @@ class RSRD(Dataset):
             cloud_camvert = vol_roi.crop_point_cloud(cloud_camvert)
 
             #o3d.visualization.draw_geometries([road_frame, mou])
-            print(f"voxel_uv_left{voxel_uv_left.shape}")
-            print(voxel_uv_left[:, -1])
-            print(voxel_uv_left[:, 16000])
+            # print(f"voxel_uv_left{voxel_uv_left.shape}")
+            # print(voxel_uv_left[:, -1])
+            # print(voxel_uv_left[:, 16000])
             #if index == 57:
                 #self.save_gt_points(cloud_camvert, 'after')
             #print("mamamamama ", np.asarray(cloud_camvert.points).max())
@@ -322,9 +469,9 @@ class RSRD(Dataset):
                 cv2.circle(img, (u_int, v_int), 2, (0, 255, 0), -1)  # green dots
 
         # Save the overlay image
-        output_path = "visualization rsrd data pcd" + addi + str(index) + ".jpg"
-        cv2.imwrite(output_path, img)
-        print(f"Overlay image saved to {output_path}")
+        # output_path = "visualization rsrd data pcd" + addi + str(index) + ".jpg"
+        # cv2.imwrite(output_path, img)
+        # print(f"Overlay image saved to {output_path}")
     
     def save_gt_points(self, pcd, str=''):
         pts = np.asarray(pcd.points)
@@ -342,8 +489,8 @@ class RSRD(Dataset):
         plt.tight_layout()
 
         # Save the plot as a PNG file
-        plt.savefig('pointcloud_projection_baseline' + str + '.png', dpi=300)
-        plt.show()
+        # plt.savefig('pointcloud_projection_baseline' + str + '.png', dpi=300)
+        # plt.show()
 
 def draw_voxel_bounding_boxes(img_path, voxel_centers, intrinsic, extrinsic, down_scale=1):
     """
@@ -381,9 +528,9 @@ def draw_voxel_bounding_boxes(img_path, voxel_centers, intrinsic, extrinsic, dow
             cv2.rectangle(img, (u - 5, v - 5), (u + 5, v + 5), (0, 255, 0))  # Green box
 
     # Save or display the image
-    output_path = "voxel_bounding_boxes.jpg"
-    cv2.imwrite(output_path, img)
-    print(f"Image with voxel bounding boxes saved to {output_path}")
+    # output_path = "voxel_bounding_boxes.jpg"
+    # cv2.imwrite(output_path, img)
+    # print(f"Image with voxel bounding boxes saved to {output_path}")
 
 
 if __name__ == '__main__':

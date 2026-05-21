@@ -50,7 +50,7 @@ def interpolate_pose(traj: dict, ts_us: int):
 
 class CARDSetDataset(Dataset):
     
-    def __init__(self, 
+    def __init__(self,
                  root_dir: Optional[str],
                  split_file: str,
                  mode: str = 'train',
@@ -59,7 +59,9 @@ class CARDSetDataset(Dataset):
                  augmentation = False,
                  use_static_rotation = True,
                  clamp_gt = False,
-                 crop_to_road = False):
+                 crop_to_road = False,
+                 y_range = None,
+                 num_grids_y = None):
         super().__init__()
         self.root_dir = root_dir
         self.mode = mode
@@ -86,16 +88,20 @@ class CARDSetDataset(Dataset):
         self._traj_cache = {}         # seq_root → parsed trajectory JSON
         self._folder_payload_cache = {}  # folder_key → (intrinsic, ground_info_template, cam_height)
         self.base_height = 1.857  # in meter, the reference height of the camera w.r.t. road surface
-        self.y_range = 0.2  # in meter, the range of interest above and below the base height， i.e., [-20cm, 20cm]
+        self.y_range = float(y_range) if y_range is not None else 0.2  # in meter, half-range above/below base_height
         self.roi_x = torch.tensor([-1.5, 1.5])    # in meter, lateral range (3m wide)
         self.roi_z = torch.tensor([5.01, 15.0])    # in meter, longitudinal range (10m deep, 5-15m ahead)
 
-        self.grid_res = torch.tensor([0.03, 0.01, 0.03])  # in [x, y(vertical), z] order. The range of interest above should be integer times of resolution here
-        
+        self.grid_res = torch.tensor([0.03, 0.01, 0.03])  # in [x, y(vertical), z] order
 
         self.num_grids_x = int((self.roi_x[1] - self.roi_x[0]) / self.grid_res[0])
         self.num_grids_z = int((self.roi_z[1] - self.roi_z[0]) / self.grid_res[2])
-        self.num_grids_y = int(self.y_range*2 / self.grid_res[1])
+        if num_grids_y is not None:
+            # Pin num_grids_y; derive grid_res_y so the head's tensor shapes are independent of y_range.
+            self.num_grids_y = int(num_grids_y)
+            self.grid_res[1] = (self.y_range * 2) / self.num_grids_y
+        else:
+            self.num_grids_y = int(self.y_range*2 / self.grid_res[1])
 
         # generate the centers of every horizontal grid
         hori_centers = torch.zeros((self.num_grids_z, self.num_grids_x, 2), dtype=torch.float32)
@@ -1635,13 +1641,15 @@ class CARDSetDataset(Dataset):
         print(f"Preprocessing complete with {save_idx} saved files!")
 
 class CARDSetDatasetV2Smalldataset(Dataset):
-    def __init__(self, 
+    def __init__(self,
                  root_dir: str,
                  mode: str = 'train',
                  reprojection_loss = False,
                  down_scale = 4,
                  clamp_gt = False,
-                 crop_to_road = False):
+                 crop_to_road = False,
+                 y_range = None,
+                 num_grids_y = None):
         super().__init__()
         self.root_dir = root_dir
         self.mode = mode
@@ -1661,16 +1669,20 @@ class CARDSetDatasetV2Smalldataset(Dataset):
         self.down_scale = down_scale
 
         self.base_height = 1.857  # in meter, the reference height of the camera w.r.t. road surface
-        self.y_range = 0.2  # in meter, the range of interest above and below the base height， i.e., [-20cm, 20cm]
+        self.y_range = float(y_range) if y_range is not None else 0.2  # in meter, half-range above/below base_height
         self.roi_x = torch.tensor([-1, 0.92])    # in meter, the lateral range of interest (in the horizontal coordinate of camera)
         self.roi_z = torch.tensor([5.16, 10.08])    # in meter, the longitudinal range of interest
 
-        self.grid_res = torch.tensor([0.03, 0.01, 0.03])  # in [x, y(vertical), z] order. The range of interest above should be integer times of resolution here
-        
+        self.grid_res = torch.tensor([0.03, 0.01, 0.03])  # in [x, y(vertical), z] order
 
         self.num_grids_x = int((self.roi_x[1] - self.roi_x[0]) / self.grid_res[0])
         self.num_grids_z = int((self.roi_z[1] - self.roi_z[0]) / self.grid_res[2])
-        self.num_grids_y = int(self.y_range*2 / self.grid_res[1])
+        if num_grids_y is not None:
+            # Pin num_grids_y; derive grid_res_y so the head's tensor shapes are independent of y_range.
+            self.num_grids_y = int(num_grids_y)
+            self.grid_res[1] = (self.y_range * 2) / self.num_grids_y
+        else:
+            self.num_grids_y = int(self.y_range*2 / self.grid_res[1])
 
         len_images = len(self.image_files)
        #print(type(self.image_files))
@@ -2440,14 +2452,65 @@ def save_image_path_in_list(input_dir, output_dir):
     print("finished making small_data_training_list")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description= "Preprocess CARIADDataset and save as pickle files")
-    parser.add_argument('--preprocess', action='store_false', help = '')
-    parser.add_argument('--mode', type=str, default='train', help='train or val')
-    args = parser.parse_args()
-    dataset = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/train_all_data_clean_NN_RHF.txt', mode='train', crop_to_road=True)
-    dataset_val = CARDSetDataset(root_dir='/data/T7/cariad dataset', split_file='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt', mode='train', crop_to_road=True)
-    dataset.preprocess_and_save_data(output_dir="/data/rhf/train_preprocessed_full_data", mode = args.mode, filter_by_labels=False)
-    #dataset_val.preprocess_and_save_data(output_dir="/data/rhf/val_preprocessed_full_data", mode = args.mode, filter_by_labels=False)
+    # parser = argparse.ArgumentParser(description="Preprocess CARIADDataset and save as pickle files")
+    # parser.add_argument('--mode', type=str, default='train', choices=['train', 'val', 'both'],
+    #                     help='which split(s) to preprocess')
+    # parser.add_argument('--crop_to_road', action='store_true',
+    #                     help='if set, project & crop to road ROI (default: square crop, crop_to_road=False)')
+    # parser.add_argument('--y_range', type=float, default=None,
+    #                     help='vertical half-range (m). If None, dataset default (0.2) is used.')
+    # parser.add_argument('--num_grids_y', type=int, default=None,
+    #                     help='if set, pin number of vertical voxel bins; grid_res_y is derived as 2*y_range/num_grids_y.')
+    # parser.add_argument('--root_dir', type=str, default='/data/T7/cariad dataset')
+    # parser.add_argument('--train_split', type=str,
+    #                     default='/data/T7/cariad dataset/train_all_data_clean_NN_RHF.txt')
+    # parser.add_argument('--val_split', type=str,
+    #                     default='/data/T7/cariad dataset/val_all_data_clean_NN_RHF.txt')
+    # parser.add_argument('--train_out', type=str, default=None,
+    #                     help='output dir for the preprocessed train split. '
+    #                          'Default: /data/rhf/train_preprocessed_data_y{y_range}_g{num_grids_y}_{crop}')
+    # parser.add_argument('--val_out', type=str, default=None,
+    #                     help='output dir for the preprocessed val split. Default mirrors --train_out.')
+    # parser.add_argument('--filter_by_labels', action='store_true',
+    #                     help='only save the labelled-frame context windows (legacy small-dataset behavior).')
+    # args = parser.parse_args()
+
+    # # Auto-name output dirs so different (y_range, num_grids_y, crop) settings don't
+    # # silently overwrite each other — voxel_uv_left in the cache depends on all three.
+    # def _tag():
+    #     y = args.y_range if args.y_range is not None else 0.2
+    #     g = args.num_grids_y if args.num_grids_y is not None else int(y * 2 / 0.01)
+    #     crop = 'cropped' if args.crop_to_road else 'square'
+    #     return f"y{y}_g{g}_{crop}"
+    # tag = _tag()
+    # train_out = args.train_out or f"/data/rhf/train_preprocessed_data_{tag}"
+    # val_out   = args.val_out   or f"/data/rhf/val_preprocessed_data_{tag}"
+
+    # common = dict(
+    #     root_dir=args.root_dir,
+    #     crop_to_road=args.crop_to_road,
+    #     y_range=args.y_range,
+    #     num_grids_y=args.num_grids_y,
+    # )
+    # print(f"[preprocess] crop_to_road={args.crop_to_road}  "
+    #       f"y_range={args.y_range}  num_grids_y={args.num_grids_y}")
+    # print(f"[preprocess] train_out={train_out}")
+    # print(f"[preprocess] val_out  ={val_out}")
+
+    # if args.mode in ('train', 'both'):
+    #     dataset = CARDSetDataset(split_file=args.train_split, mode='train', **common)
+    #     print(f"[preprocess] train dataset: y_range={dataset.y_range}, "
+    #           f"num_grids_y={dataset.num_grids_y}, grid_res_y={float(dataset.grid_res[1]):.4f}")
+    #     dataset.preprocess_and_save_data(output_dir=train_out, mode='train',
+    #                                      filter_by_labels=args.filter_by_labels)
+    # if args.mode in ('val', 'both'):
+    #     dataset_val = CARDSetDataset(split_file=args.val_split, mode='train', **common)
+    #     print(f"[preprocess] val dataset: y_range={dataset_val.y_range}, "
+    #           f"num_grids_y={dataset_val.num_grids_y}, grid_res_y={float(dataset_val.grid_res[1]):.4f}")
+    #     # mode='train' below keeps the richer payload schema used by the trainer; switch to 'test'
+    #     # if you want the lighter eval-only payload.
+    #     dataset_val.preprocess_and_save_data(output_dir=val_out, mode='train',
+    #                                          filter_by_labels=args.filter_by_labels)
 
     """ import numpy as np
     import cv2
@@ -2495,6 +2558,6 @@ if __name__ == "__main__":
     print(f"Depth range: {depth_min:.2f} to {depth_max:.2f}")
 
     """
-    #save_image_path_in_list(input_dir = "/data/rhf/val_preprocessed_small_data_thesis", output_dir = "/data/rhf/val_small_dataset_thesis_cropped.txt")
-    #save_image_path_in_list(input_dir = "/data/rhf/train_preprocessed_small_data_thesis", output_dir = "/data/rhf/train_small_dataset_thesis_cropped.txt")
+    save_image_path_in_list(input_dir = "/data/rhf/val_preprocessed_data_y0.4_g40_square", output_dir = "/data/rhf/val_dataset_y0.4_g40_square.txt")
+    save_image_path_in_list(input_dir = "/data/rhf/train_preprocessed_data_y0.4_g40_square", output_dir = "/data/rhf/train_dataset_y0.4_g40_square.txt")
  

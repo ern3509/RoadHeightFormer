@@ -22,7 +22,7 @@ model:
 
 # Training Configuration
 training:
-  batch_size: 16
+  batch_size: 8
   epochs: 100
   seed: 307
 
