@@ -20,3 +20,4 @@ models/RoabBEV-mono.ckpt
 *.ckpt
 *.zip
 *.log
+*.ckpt
