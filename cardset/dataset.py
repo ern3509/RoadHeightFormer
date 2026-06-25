@@ -183,17 +183,8 @@ class CARDSetDataset(Dataset):
                 print(f"Removed pair with empty point cloud: {img_path}, {depth_path}")
 
         return valid_pairs
-    
+
     def crop_point_cloud(self, pcd):
-        """
-        Crop the point cloud using the region of interest (ROI).
-
-        Args:
-            pcd (o3d.geometry.PointCloud): Input point cloud.
-
-        Returns:
-            o3d.geometry.PointCloud: Cropped point cloud.
-        """
         points = np.asarray(pcd.points)
         crop_bounding = np.array([
             [self.roi_x[0], 0, self.roi_z[0]],
@@ -210,7 +201,7 @@ class CARDSetDataset(Dataset):
 
         sol = vol.crop_point_cloud(pcd)
         return sol
-    
+
 
     def create_image_depth_pairs(self, images_name):
         """
@@ -2483,8 +2474,8 @@ if __name__ == "__main__":
     #     crop = 'cropped' if args.crop_to_road else 'square'
     #     return f"y{y}_g{g}_{crop}"
     # tag = _tag()
-    # train_out = args.train_out or f"/data/rhf/train_preprocessed_data_{tag}"
-    # val_out   = args.val_out   or f"/data/rhf/val_preprocessed_data_{tag}"
+    # train_out = args.train_out or f"/data/rhf/train_preprocessed_data_final" #{tag}"
+    # val_out   = args.val_out   or f"/data/rhf/val_preprocessed_data_final" #{tag}"
 
     # common = dict(
     #     root_dir=args.root_dir,
@@ -2558,6 +2549,6 @@ if __name__ == "__main__":
     print(f"Depth range: {depth_min:.2f} to {depth_max:.2f}")
 
     """
-    save_image_path_in_list(input_dir = "/data/rhf/val_preprocessed_data_y0.4_g40_square", output_dir = "/data/rhf/val_dataset_y0.4_g40_square.txt")
-    save_image_path_in_list(input_dir = "/data/rhf/train_preprocessed_data_y0.4_g40_square", output_dir = "/data/rhf/train_dataset_y0.4_g40_square.txt")
+    save_image_path_in_list(input_dir = "/data/rhf/val_preprocessed_data_final", output_dir = "/data/rhf/val_dataset_paper.txt")
+    save_image_path_in_list(input_dir = "/data/rhf/train_preprocessed_data_final", output_dir = "/data/rhf/train_dataset_paper.txt")
  

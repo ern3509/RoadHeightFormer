@@ -1,21 +1,33 @@
 #!/bin/bash
 
-# RoadHeightFormer Training Script with Config Support
-# Usage: ./run_experiments.sh [config_file] [additional_args]
+# RoadHeightFormer training launcher.
+#
+# Usage:
+#   ./run_experiments.sh <config_file> [extra train.py args]
+#
+# Pick a GPU by exporting CUDA_VISIBLE_DEVICES (defaults to 0):
+#   CUDA_VISIBLE_DEVICES=0 ./run_experiments.sh configs/config_freeze_baseline.yaml
+#   CUDA_VISIBLE_DEVICES=1 ./run_experiments.sh configs/config_efficientnet.yaml
 
-CONFIG_FILE=${1:-"config.yaml"}
-shift  # Remove first argument so remaining args are passed to train.py
+set -euo pipefail
+
+CONFIG_FILE="${1:-configs/config_freeze_baseline.yaml}"
+shift || true  # safe shift (no-op if no args)
+
+: "${CUDA_VISIBLE_DEVICES:=0}"
+export CUDA_VISIBLE_DEVICES
 
 echo "====================="
-echo "Running experiments..."
+echo "RoadHeightFormer run"
 echo "====================="
-echo "Using configuration file: $CONFIG_FILE"
-echo "Additional arguments: $@"
+echo "Config:                $CONFIG_FILE"
+echo "CUDA_VISIBLE_DEVICES:  $CUDA_VISIBLE_DEVICES"
+echo "Extra args:            $*"
+echo "---------------------"
 
-# Run training with config file
 python train.py --config "$CONFIG_FILE" "$@"
 
-# Example usage:
-# ./run_experiments.sh config.yaml --epochs 100 --batch_size 16
-# ./run_experiments.sh experiments/experiment_1.yaml
-# ./run_experiments.sh config.yaml --name_run "test_run" --notes "Testing new loss"
+# Examples:
+#   CUDA_VISIBLE_DEVICES=0 ./run_experiments.sh configs/config_freeze_baseline.yaml
+#   CUDA_VISIBLE_DEVICES=1 ./run_experiments.sh configs/config_efficientnet.yaml
+#   CUDA_VISIBLE_DEVICES=0 ./run_experiments.sh configs/config_freeze_baseline.yaml --name_run "freeze_rerun"
