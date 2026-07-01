@@ -1,7 +1,7 @@
 
 # RoadHeightFormer (RHF)
 
-RoadHeightFormer (RHF) is a monocular road surface elevation estimation framework that builds on the Bird's Eye View pipeline introduced by RoadBEV. It replaces the EfficientNet encoder with a frozen DINOv2 ViT-S/14 backbone, adds a patch2feature upsampler to recover spatial resolution, and trains with a composite loss combining L1, multi-scale gradient, and surface-normal terms. Evaluated on the CARDSet dataset, RHF achieves approximately **30% improvement in absolute error over RoadBEV**.
+RoadHeightFormer (RHF) is a monocular road surface elevation estimation framework that builds on the Bird's Eye View pipeline introduced by RoadBEV. It replaces the EfficientNet encoder with a frozen DINOv2 ViT-S/14 backbone, adds a patch2feature upsampler to recover spatial resolution, and trains with a composite loss combining L1, multi-scale gradient, and surface-normal terms. Evaluated on the CARDSet dataset, RHF achieves approximately **34% improvement in absolute error over RoadBEV**.
 
 ![RHF pipeline](imgs/pipeline_banner.png)
 
